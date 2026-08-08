@@ -4,6 +4,9 @@ import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import './App.css';
 import startIcon from './assets/start-icon.svg';
+import folderIcon from './assets/icon-folder.svg';
+import terminalIcon from './assets/icon-terminal.svg';
+import settingsIcon from './assets/icon-settings.svg';
 import {
   ExtensionVMConnection,
   type ConnectionProfile,
@@ -13,6 +16,7 @@ import {
 import { getStoredHandle, setStoredHandle } from './handles';
 
 type AppId = 'files' | 'terminal' | 'settings';
+type Screen = 'lock' | 'login' | 'desktop';
 type WindowState = {
   closed: boolean;
   minimized: boolean;
@@ -25,14 +29,14 @@ type IconPosition = { x: number; y: number };
 type AppDescriptor = {
   id: AppId;
   name: string;
-  iconClass: string;
+  icon: string;
   requiresConnection: boolean;
 };
 
 const APPS: AppDescriptor[] = [
-  { id: 'files', name: 'File Explorer', iconClass: 'folder-icon', requiresConnection: true },
-  { id: 'terminal', name: 'Terminal', iconClass: 'terminal-icon', requiresConnection: true },
-  { id: 'settings', name: 'Settings', iconClass: 'settings-icon', requiresConnection: false },
+  { id: 'files', name: 'File Explorer', icon: folderIcon, requiresConnection: true },
+  { id: 'terminal', name: 'Terminal', icon: terminalIcon, requiresConnection: true },
+  { id: 'settings', name: 'Settings', icon: settingsIcon, requiresConnection: false },
 ];
 
 const defaultWindows: Record<AppId, WindowState> = {
@@ -41,7 +45,6 @@ const defaultWindows: Record<AppId, WindowState> = {
   settings: { closed: true, minimized: false, maximized: false, x: 210, y: 60 },
 };
 
-// Matches the 96px background-size of the .desktop-surface grid pattern so icons visually snap to it.
 const ICON_GRID_X = 96;
 const ICON_GRID_Y = 96;
 const ICON_ORIGIN_X = 0;
@@ -112,6 +115,13 @@ const formatTime = () =>
     minute: '2-digit',
   }).format(new Date());
 
+const formatLockDate = () =>
+  new Intl.DateTimeFormat(undefined, {
+    weekday: 'long',
+    month: 'long',
+    day: 'numeric',
+  }).format(new Date());
+
 type PermissionState = 'granted' | 'denied' | 'prompt';
 type FileHandleLike = {
   name: string;
@@ -173,7 +183,11 @@ const useTerminal = (
   connected: boolean,
   error: string,
 ) => {
-  const ref = useRef<HTMLDivElement | null>(null);
+  // A plain useRef + a [] effect misses the container: the div only mounts once the
+  // Terminal window's section renders (gated by `connected`), which is false on the very
+  // first render, so a mount-once effect would find ref.current still null. A callback ref
+  // (stored in state) lets the init effect re-run exactly when the node actually appears.
+  const [node, setNode] = useState<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
   const connectedRef = useRef(connected);
@@ -189,7 +203,7 @@ const useTerminal = (
   }, [onCommand]);
 
   useEffect(() => {
-    if (!ref.current || terminalRef.current) {
+    if (!node || terminalRef.current) {
       return;
     }
 
@@ -207,7 +221,7 @@ const useTerminal = (
     });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
-    terminal.open(ref.current);
+    terminal.open(node);
     fitAddon.fit();
     terminalRef.current = terminal;
     fitRef.current = fitAddon;
@@ -255,7 +269,7 @@ const useTerminal = (
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, []);
+  }, [node]);
 
   useEffect(() => {
     if (!terminalRef.current || !error) {
@@ -264,10 +278,12 @@ const useTerminal = (
     terminalRef.current.writeln(`\r\n[error] ${error}`);
   }, [error]);
 
-  return ref;
+  return setNode;
 };
 
 function App() {
+  const [screen, setScreen] = useState<Screen>('lock');
+  const [lockDate, setLockDate] = useState(formatLockDate);
   const [profile, setProfile] = useState<ConnectionProfile>(defaultProfile);
   const [target, setTarget] = useState(() => window.localStorage.getItem(LAST_TARGET_KEY) ?? 'ubuntu@');
   const [connected, setConnected] = useState(false);
@@ -280,6 +296,7 @@ function App() {
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [clock, setClock] = useState(formatTime);
   const [startOpen, setStartOpen] = useState(false);
+  const [startSearch, setStartSearch] = useState('');
   const [iconPositions, setIconPositions] = useState<Record<AppId, IconPosition>>(loadIconPositions);
   const [wallpaper, setWallpaper] = useState(() => window.localStorage.getItem(WALLPAPER_KEY) ?? '');
   const [wallpaperFolder, setWallpaperFolder] = useState('');
@@ -293,9 +310,25 @@ function App() {
   const startMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
-    const id = window.setInterval(() => setClock(formatTime()), 30_000);
+    const id = window.setInterval(() => {
+      setClock(formatTime());
+      setLockDate(formatLockDate());
+    }, 15_000);
     return () => window.clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    if (screen !== 'lock') {
+      return;
+    }
+    const wake = () => setScreen('login');
+    window.addEventListener('keydown', wake);
+    window.addEventListener('pointerdown', wake);
+    return () => {
+      window.removeEventListener('keydown', wake);
+      window.removeEventListener('pointerdown', wake);
+    };
+  }, [screen]);
 
   useEffect(() => {
     const parsed = parseTarget(target);
@@ -331,6 +364,7 @@ function App() {
     const onPointerDown = (event: PointerEvent) => {
       if (startMenuRef.current && !startMenuRef.current.contains(event.target as Node)) {
         setStartOpen(false);
+        setStartSearch('');
       }
     };
     window.addEventListener('pointerdown', onPointerDown);
@@ -382,7 +416,7 @@ function App() {
     }
   };
 
-  const terminalRef = useTerminal(execute, connected, error);
+  const terminalNodeRef = useTerminal(execute, connected, error);
 
   const openWindow = (id: AppId) => {
     setActive(id);
@@ -744,15 +778,53 @@ function App() {
       active === id ? 'is-focused' : '',
       windows[id].maximized ? 'is-maximized' : '',
       windows[id].minimized ? 'is-minimized' : '',
+      windows[id].closed ? 'is-closed' : '',
     ]
       .filter(Boolean)
       .join(' ');
 
+  const backgroundStyle = wallpaper
+    ? { backgroundImage: `url(${wallpaper})`, backgroundSize: 'cover', backgroundPosition: 'center' }
+    : undefined;
+
+  const filteredApps = APPS.filter((app) => app.name.toLowerCase().includes(startSearch.trim().toLowerCase()));
+
+  if (screen === 'lock') {
+    return (
+      <div className="lock-screen" style={backgroundStyle}>
+        <div className="lock-screen-scrim" />
+        <div className="lock-screen-clock">
+          <span className="lock-time">{clock}</span>
+          <span className="lock-date">{lockDate}</span>
+        </div>
+        <div className="lock-screen-hint">Click or press any key to continue</div>
+      </div>
+    );
+  }
+
+  if (screen === 'login') {
+    return (
+      <div className="login-screen" style={backgroundStyle}>
+        <div className="lock-screen-scrim" />
+        <div className="login-card">
+          <img src={startIcon} alt="" className="login-avatar" />
+          <span className="login-name">User</span>
+          <button className="login-signin" onClick={() => setScreen('desktop')} autoFocus>
+            <span>Sign in</span>
+            <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+              <path d="M3 8h9M8 3l5 5-5 5" stroke="currentColor" strokeWidth="1.4" fill="none" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </div>
+        <div className="login-power">
+          <button aria-label="Back to lock screen" onClick={() => setScreen('lock')}>‹ Back</button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div
-      className="os-shell"
-      style={wallpaper ? { backgroundImage: `url(${wallpaper})`, backgroundSize: 'cover', backgroundPosition: 'center' } : undefined}
-    >
+    <div className="os-shell" style={backgroundStyle}>
       <main className="desktop-surface">
         {APPS.map((app) => (
           <button
@@ -763,7 +835,7 @@ function App() {
             onClick={(event) => handleIconClick(app.id, event)}
             disabled={app.requiresConnection && !connected}
           >
-            <span className={`shortcut-icon ${app.iconClass}`} />
+            <img src={app.icon} alt="" className="shortcut-icon" />
             <span>{app.name}</span>
           </button>
         ))}
@@ -823,16 +895,17 @@ function App() {
             onPointerDown={() => setActive('files')}
           >
             <header className="window-titlebar" onPointerDown={(event) => beginDrag('files', event)}>
+              <img src={folderIcon} alt="" className="titlebar-icon" />
               <span>File Explorer</span>
               <div className="window-controls">
                 <button aria-label="Minimize" onPointerDown={(event) => event.stopPropagation()} onClick={() => minimizeWindow('files')} />
                 <button aria-label="Maximize" onPointerDown={(event) => event.stopPropagation()} onClick={() => maximizeWindow('files')} />
-                <button aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeWindow('files')} />
+                <button className="is-close" aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeWindow('files')} />
               </div>
             </header>
-            <div className="explorer-toolbar">
+            <div className="explorer-command-bar">
               <button
-                className="nav-arrow"
+                className="cmd-arrow"
                 aria-label="Back"
                 onClick={goBack}
                 disabled={!connected || historyIndex === 0}
@@ -840,74 +913,95 @@ function App() {
                 ‹
               </button>
               <button
-                className="nav-arrow"
+                className="cmd-arrow"
                 aria-label="Forward"
                 onClick={goForward}
                 disabled={!connected || historyIndex >= history.length - 1}
               >
                 ›
               </button>
-              <button onClick={() => void navigateTo('/')} disabled={!connected}>
-                Home
-              </button>
-              <input
-                value={addressInput}
-                onChange={(e) => setAddressInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    void navigateTo(addressInput);
-                  }
-                }}
-              />
-              <button aria-label="Refresh" onClick={refreshDirectory} disabled={!connected}>
+              <button className="cmd-arrow" aria-label="Refresh" onClick={refreshDirectory} disabled={!connected}>
                 ↻
               </button>
+              <div className="explorer-breadcrumb">
+                <input
+                  value={addressInput}
+                  onChange={(e) => setAddressInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      void navigateTo(addressInput);
+                    }
+                  }}
+                />
+              </div>
             </div>
             <div className="explorer-body">
               <aside>
-                <button onClick={() => void navigateTo('/')} disabled={!connected}>Root</button>
-                <button onClick={() => void navigateTo('/home')} disabled={!connected}>Home</button>
-                <button onClick={() => void navigateTo('/var/log')} disabled={!connected}>Logs</button>
+                <div className="nav-section-label">Quick access</div>
+                <button className={path === '/' ? 'is-active' : ''} onClick={() => void navigateTo('/')} disabled={!connected}>
+                  <span className="nav-icon" /> Root
+                </button>
+                <button className={path === '/home' ? 'is-active' : ''} onClick={() => void navigateTo('/home')} disabled={!connected}>
+                  <span className="nav-icon" /> Home
+                </button>
+                <button className={path === '/var/log' ? 'is-active' : ''} onClick={() => void navigateTo('/var/log')} disabled={!connected}>
+                  <span className="nav-icon" /> Logs
+                </button>
               </aside>
-              <ul className="file-list">
-                {entries.map((entry) => (
-                  <li
-                    key={entry.path}
-                    className={entry.isDirectory ? 'is-directory' : ''}
-                    onClick={() => openFilePath(entry)}
-                  >
-                    <span className={entry.isDirectory ? 'file-icon is-folder' : 'file-icon'} />
-                    <span>{entry.name}</span>
-                    <small>{entry.permissions}</small>
-                    <small>{entry.size}B</small>
-                    <small>{entry.modifiedAt}</small>
-                  </li>
-                ))}
-                {entries.length === 0 && (
-                  <li className="empty-row">
-                    <span>{connected ? 'No files' : 'Connect to browse files'}</span>
-                  </li>
-                )}
-              </ul>
+              <div className="explorer-list-pane">
+                <div className="file-list-header">
+                  <span />
+                  <span>Name</span>
+                  <span>Permissions</span>
+                  <span>Size</span>
+                  <span>Date modified</span>
+                </div>
+                <ul className="file-list">
+                  {entries.map((entry) => (
+                    <li
+                      key={entry.path}
+                      className={entry.isDirectory ? 'is-directory' : ''}
+                      onClick={() => openFilePath(entry)}
+                    >
+                      <span className={entry.isDirectory ? 'file-icon is-folder' : 'file-icon'} />
+                      <span>{entry.name}</span>
+                      <small>{entry.permissions}</small>
+                      <small>{entry.size}B</small>
+                      <small>{entry.modifiedAt}</small>
+                    </li>
+                  ))}
+                  {entries.length === 0 && (
+                    <li className="empty-row">
+                      <span>{connected ? 'This folder is empty' : 'Connect to browse files'}</span>
+                    </li>
+                  )}
+                </ul>
+                <div className="explorer-status-bar">
+                  <span>{entries.length} item{entries.length === 1 ? '' : 's'}</span>
+                </div>
+              </div>
             </div>
           </section>
         )}
 
-        {connected && !windows.terminal.closed && (
+        {connected && (
           <section
             className={windowClassName('terminal', 'terminal-window')}
             style={windows.terminal.maximized ? undefined : { left: windows.terminal.x, top: windows.terminal.y }}
             onPointerDown={() => setActive('terminal')}
           >
-            <header className="window-titlebar" onPointerDown={(event) => beginDrag('terminal', event)}>
-              <span>Terminal</span>
+            <header className="window-titlebar is-dark" onPointerDown={(event) => beginDrag('terminal', event)}>
+              <div className="terminal-tab">
+                <img src={terminalIcon} alt="" className="titlebar-icon" />
+                <span>Ubuntu</span>
+              </div>
               <div className="window-controls">
                 <button aria-label="Minimize" onPointerDown={(event) => event.stopPropagation()} onClick={() => minimizeWindow('terminal')} />
                 <button aria-label="Maximize" onPointerDown={(event) => event.stopPropagation()} onClick={() => maximizeWindow('terminal')} />
-                <button aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeWindow('terminal')} />
+                <button className="is-close" aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeWindow('terminal')} />
               </div>
             </header>
-            <div ref={terminalRef} className="terminal" />
+            <div ref={terminalNodeRef} className="terminal" />
           </section>
         )}
 
@@ -918,98 +1012,153 @@ function App() {
             onPointerDown={() => setActive('settings')}
           >
             <header className="window-titlebar" onPointerDown={(event) => beginDrag('settings', event)}>
+              <img src={settingsIcon} alt="" className="titlebar-icon" />
               <span>Settings</span>
               <div className="window-controls">
                 <button aria-label="Minimize" onPointerDown={(event) => event.stopPropagation()} onClick={() => minimizeWindow('settings')} />
                 <button aria-label="Maximize" onPointerDown={(event) => event.stopPropagation()} onClick={() => maximizeWindow('settings')} />
-                <button aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeWindow('settings')} />
+                <button className="is-close" aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeWindow('settings')} />
               </div>
             </header>
-            <div className="settings-body">
-              <h2>Personalization</h2>
-              <p className="settings-hint">Choose a folder on your PC to browse its images and set one as your wallpaper.</p>
-              <div className="settings-row">
-                <button onClick={() => void chooseWallpaperFolder()}>Choose folder</button>
-                {wallpaperFolder && <span className="settings-folder-label">{wallpaperFolder}</span>}
-                {wallpaper && (
-                  <button className="settings-secondary" onClick={() => setWallpaper('')}>
-                    Clear wallpaper
+            <div className="settings-shell">
+              <aside className="settings-nav">
+                <div className="settings-account">
+                  <img src={startIcon} alt="" className="settings-avatar" />
+                  <div>
+                    <strong>User</strong>
+                    <span>{connected ? 'Connected' : 'Local account'}</span>
+                  </div>
+                </div>
+                <button className="is-active">
+                  <span className="nav-icon" /> Personalization
+                </button>
+                <button disabled>
+                  <span className="nav-icon" /> System
+                </button>
+                <button disabled>
+                  <span className="nav-icon" /> Network &amp; internet
+                </button>
+                <button disabled>
+                  <span className="nav-icon" /> Apps
+                </button>
+                <button disabled>
+                  <span className="nav-icon" /> Accounts
+                </button>
+              </aside>
+              <div className="settings-body">
+                <h2>Personalization &gt; Background</h2>
+                <p className="settings-hint">Choose a folder on your PC to browse its images and set one as your desktop background.</p>
+                <div className="settings-row">
+                  <button onClick={() => void chooseWallpaperFolder()}>Choose folder</button>
+                  {wallpaperFolder && <span className="settings-folder-label">{wallpaperFolder}</span>}
+                  {wallpaper && (
+                    <button className="settings-secondary" onClick={() => setWallpaper('')}>
+                      Clear wallpaper
+                    </button>
+                  )}
+                </div>
+                {savedWallpaperFolderName && !wallpaperImages.length && (
+                  <button type="button" className="use-saved-link" onClick={() => void applySavedWallpaperFolder()}>
+                    Use saved folder: {savedWallpaperFolderName}
                   </button>
                 )}
+                {wallpaperStatus && <p className="settings-status">{wallpaperStatus}</p>}
+                {wallpaperImages.length > 0 && (
+                  <div className="wallpaper-grid">
+                    {wallpaperImages.map((image) => (
+                      <button
+                        key={image.url}
+                        className={wallpaper && image.url === wallpaper ? 'wallpaper-thumb is-active' : 'wallpaper-thumb'}
+                        onClick={() => void applyWallpaper(image)}
+                        title={image.name}
+                      >
+                        <img src={image.url} alt={image.name} loading="lazy" />
+                      </button>
+                    ))}
+                  </div>
+                )}
               </div>
-              {savedWallpaperFolderName && !wallpaperImages.length && (
-                <button type="button" className="use-saved-link" onClick={() => void applySavedWallpaperFolder()}>
-                  Use saved folder: {savedWallpaperFolderName}
-                </button>
-              )}
-              {wallpaperStatus && <p className="settings-status">{wallpaperStatus}</p>}
-              {wallpaperImages.length > 0 && (
-                <div className="wallpaper-grid">
-                  {wallpaperImages.map((image) => (
-                    <button
-                      key={image.url}
-                      className={wallpaper && image.url === wallpaper ? 'wallpaper-thumb is-active' : 'wallpaper-thumb'}
-                      onClick={() => void applyWallpaper(image)}
-                      title={image.name}
-                    >
-                      <img src={image.url} alt={image.name} loading="lazy" />
-                    </button>
-                  ))}
-                </div>
-              )}
             </div>
           </section>
         )}
       </main>
 
       <footer className="taskbar">
-        <button
-          className={startOpen ? 'start-button is-active' : 'start-button'}
-          aria-label="Start"
-          onClick={() => setStartOpen((open) => !open)}
-        >
-          <img src={startIcon} alt="" className="start-icon" />
-        </button>
-        {APPS.filter((app) => app.id !== 'settings').map((app) => (
+        <div className="taskbar-center">
           <button
-            key={app.id}
-            className={active === app.id && !windows[app.id].minimized && !windows[app.id].closed ? 'taskbar-app is-active' : 'taskbar-app'}
-            onClick={() => toggleApp(app.id)}
-            disabled={app.requiresConnection && !connected}
+            className={startOpen ? 'start-button is-active' : 'start-button'}
+            aria-label="Start"
+            onClick={() => setStartOpen((open) => !open)}
           >
-            <span className={`task-icon ${app.iconClass}`} />
-            <span>{app.name}</span>
+            <img src={startIcon} alt="" className="start-icon" />
           </button>
-        ))}
-        <div className="taskbar-spacer" />
-        <time>{clock}</time>
+          {APPS.filter((app) => app.id !== 'settings').map((app) => (
+            <button
+              key={app.id}
+              aria-label={app.name}
+              title={app.name}
+              className={active === app.id && !windows[app.id].minimized && !windows[app.id].closed ? 'taskbar-app is-active' : 'taskbar-app'}
+              onClick={() => toggleApp(app.id)}
+              disabled={app.requiresConnection && !connected}
+            >
+              <img src={app.icon} alt="" className="task-icon" />
+            </button>
+          ))}
+        </div>
+
+        <div className="taskbar-tray">
+          <span className={connected ? 'network is-online' : 'network'} title={connected ? 'Connected' : 'Disconnected'} />
+          <div className="tray-clock">
+            <time>{clock}</time>
+          </div>
+        </div>
 
         {startOpen && (
           <div className="start-menu" ref={startMenuRef}>
-            <div className="start-menu-status">
-              <span className={connected ? 'network is-online' : 'network'} />
-              <div>
-                <strong>{connected ? profile.name : 'Not connected'}</strong>
-                <span>{status}</span>
-              </div>
-              {connected && (
-                <button onClick={() => void disconnect()}>Disconnect</button>
-              )}
+            <div className="start-menu-search">
+              <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true">
+                <circle cx="7" cy="7" r="5" stroke="currentColor" strokeWidth="1.3" fill="none" />
+                <line x1="11" y1="11" x2="15" y2="15" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+              </svg>
+              <input
+                value={startSearch}
+                onChange={(e) => setStartSearch(e.target.value)}
+                placeholder="Type here to search"
+              />
             </div>
+
+            <div className="start-menu-pinned-label">Pinned</div>
             <div className="start-menu-apps">
-              {APPS.map((app) => (
+              {filteredApps.map((app) => (
                 <button
                   key={app.id}
                   onClick={() => {
                     toggleApp(app.id);
                     setStartOpen(false);
+                    setStartSearch('');
                   }}
                   disabled={app.requiresConnection && !connected}
                 >
-                  <span className={`shortcut-icon ${app.iconClass}`} />
+                  <img src={app.icon} alt="" className="shortcut-icon" />
                   <span>{app.name}</span>
                 </button>
               ))}
+              {filteredApps.length === 0 && <p className="start-menu-empty">No results</p>}
+            </div>
+
+            <div className="start-menu-footer">
+              <button className="start-menu-account" onClick={() => setScreen('lock')}>
+                <img src={startIcon} alt="" className="settings-avatar" />
+                <div>
+                  <strong>User</strong>
+                  <span>{connected ? `Connected to ${profile.name}` : status}</span>
+                </div>
+              </button>
+              {connected && (
+                <button className="start-menu-disconnect" onClick={() => void disconnect()}>
+                  Disconnect
+                </button>
+              )}
             </div>
           </div>
         )}
