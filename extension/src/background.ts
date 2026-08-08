@@ -1,15 +1,55 @@
 import { HOST_NAME, TRUSTED_ORIGINS, type NativeRequest, type NativeResponse } from './types';
 
+// The native companion keeps SSH/SFTP state (sshClient, sftpClient) in memory across requests.
+// chrome.runtime.sendNativeMessage spawns a fresh host process per call and kills it after the
+// reply, which drops that state immediately after "connect" — every following request then hits
+// a brand-new process with no session, surfacing as "TIMEOUT: not connected". connectNative keeps
+// one host process (and its SSH session) alive across requests instead.
+let port: chrome.runtime.Port | null = null;
+const pending = new Map<string, (response: NativeResponse) => void>();
+
+const failAllPending = (message: string) => {
+  for (const [requestId, resolve] of pending) {
+    resolve({ requestId, ok: false, error: { code: 'NATIVE_HOST_UNAVAILABLE', message } });
+  }
+  pending.clear();
+};
+
+const getPort = (): chrome.runtime.Port => {
+  if (port) {
+    return port;
+  }
+
+  const p = chrome.runtime.connectNative(HOST_NAME);
+  p.onMessage.addListener((response: NativeResponse) => {
+    const resolve = pending.get(response.requestId);
+    if (resolve) {
+      pending.delete(response.requestId);
+      resolve(response);
+    }
+  });
+  p.onDisconnect.addListener(() => {
+    const detail = chrome.runtime.lastError?.message ?? 'Native companion disconnected.';
+    console.error(`[vm-desktop] native port to ${HOST_NAME} disconnected: ${detail}`);
+    port = null;
+    failAllPending(detail);
+  });
+
+  port = p;
+  return p;
+};
+
 const withNativeHost = async (request: NativeRequest): Promise<NativeResponse> => {
   try {
-    const response = (await chrome.runtime.sendNativeMessage(HOST_NAME, request)) as NativeResponse;
-    if (chrome.runtime.lastError) {
-      throw new Error(chrome.runtime.lastError.message);
-    }
-    return response;
+    const p = getPort();
+    return await new Promise<NativeResponse>((resolve) => {
+      pending.set(request.requestId, resolve);
+      p.postMessage(request);
+    });
   } catch (err) {
     const detail = chrome.runtime.lastError?.message ?? (err instanceof Error ? err.message : String(err));
-    console.error(`[vm-desktop] sendNativeMessage(${HOST_NAME}) failed: ${detail}`);
+    console.error(`[vm-desktop] connectNative(${HOST_NAME}) failed: ${detail}`);
+    pending.delete(request.requestId);
     return {
       requestId: request.requestId,
       ok: false,
