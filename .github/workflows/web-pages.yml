@@ -5,6 +5,7 @@ on:
     branches: ["**"]
     paths:
       - "web/**"
+      - "CNAME"
       - ".github/workflows/web-pages.yml"
   workflow_dispatch:
 
@@ -38,7 +39,12 @@ jobs:
         run: npm ci
 
       - name: Build web
-        run: npm run build -- --base=/vm/
+        run: npm run build -- --base=/
+
+      - name: Configure Pages artifact
+        run: |
+          cp ../CNAME dist/CNAME
+          touch dist/.nojekyll
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
