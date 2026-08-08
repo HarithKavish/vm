@@ -23,5 +23,9 @@ export type NativeResponse = {
   };
 };
 
-export const TRUSTED_ORIGINS = ['https://vm.harithkavish.com', 'http://localhost:5173'];
+export const TRUSTED_ORIGINS = [
+  'https://vm.harithkavish.com',
+  'https://harithkavish.github.io',
+  'http://localhost:5173',
+];
 export const HOST_NAME = 'com.harith.vm_desktop';
