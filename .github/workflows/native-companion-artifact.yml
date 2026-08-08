@@ -1,0 +1,65 @@
+name: Build Native Companion Artifacts
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "native-companion/**"
+      - ".github/workflows/native-companion-artifact.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            binary_name: vm-desktop-companion
+            artifact_name: native-companion-linux-amd64
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            binary_name: vm-desktop-companion.exe
+            artifact_name: native-companion-windows-amd64
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            binary_name: vm-desktop-companion
+            artifact_name: native-companion-macos-arm64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: native-companion
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: native-companion/go.mod
+
+      - name: Test native companion
+        run: go test ./...
+
+      - name: Build native companion
+        shell: bash
+        run: |
+          mkdir -p dist
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o dist/${{ matrix.binary_name }} .
+          cp native-host.manifest.example.json dist/
+
+      - name: Upload native companion artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: |
+            native-companion/dist/${{ matrix.binary_name }}
+            native-companion/dist/native-host.manifest.example.json
+          if-no-files-found: error

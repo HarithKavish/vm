@@ -43,6 +43,32 @@ const defaultProfile: ConnectionProfile = {
   port: 22,
   username: 'ubuntu',
 };
+const LAST_TARGET_KEY = 'vm-desktop-last-target';
+
+const parseTarget = (target: string) => {
+  const trimmed = target.trim();
+  const atIndex = trimmed.indexOf('@');
+  if (atIndex <= 0 || atIndex === trimmed.length - 1) {
+    return null;
+  }
+
+  const username = trimmed.slice(0, atIndex).trim();
+  const hostPort = trimmed.slice(atIndex + 1).trim();
+  if (!username || !hostPort) {
+    return null;
+  }
+
+  const colonIndex = hostPort.lastIndexOf(':');
+  if (colonIndex > 0 && colonIndex < hostPort.length - 1) {
+    const host = hostPort.slice(0, colonIndex).trim();
+    const portValue = Number(hostPort.slice(colonIndex + 1));
+    if (host && Number.isInteger(portValue) && portValue > 0) {
+      return { username, host, port: portValue };
+    }
+  }
+
+  return { username, host: hostPort, port: 22 };
+};
 
 const formatTime = () =>
   new Intl.DateTimeFormat(undefined, {
@@ -151,6 +177,7 @@ const useTerminal = (
 
 function App() {
   const [profile, setProfile] = useState<ConnectionProfile>(defaultProfile);
+  const [target, setTarget] = useState(() => window.localStorage.getItem(LAST_TARGET_KEY) ?? 'ubuntu@');
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState('Choose a key');
   const [error, setError] = useState('');
@@ -165,6 +192,21 @@ function App() {
     const id = window.setInterval(() => setClock(formatTime()), 30_000);
     return () => window.clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    const parsed = parseTarget(target);
+    if (!parsed) {
+      return;
+    }
+
+    setProfile((current) => ({
+      ...current,
+      username: parsed.username,
+      host: parsed.host,
+      port: parsed.port,
+      name: parsed.host,
+    }));
+  }, [target]);
 
   const execute = async (command: string): Promise<string> => {
     try {
@@ -291,15 +333,30 @@ function App() {
   };
 
   const connect = async () => {
+    const parsed = parseTarget(target);
+    if (!parsed) {
+      setError('Use the format ubuntu@w.x.y.z or ubuntu@w.x.y.z:22');
+      return;
+    }
+
     setError('');
     setStatus('Connecting...');
     try {
-      await connection.connect(profile, { userConsent: true });
+      const nextProfile = {
+        ...profile,
+        username: parsed.username,
+        host: parsed.host,
+        port: parsed.port,
+        name: parsed.host,
+      };
+      await connection.connect(nextProfile, { userConsent: true });
       const list = await connection.listDirectory('/');
       setEntries(list);
       setPath('/');
       setConnected(true);
       setActive('files');
+      setProfile(nextProfile);
+      window.localStorage.setItem(LAST_TARGET_KEY, target.trim());
       setWindows((current) => ({
         ...current,
         files: {
@@ -308,13 +365,13 @@ function App() {
           minimized: false,
         },
       }));
-      setStatus(`Connected to ${profile.host}`);
+      setStatus(`Connected to ${parsed.host}`);
     } catch (e) {
       const err = e as VMConnectionError;
       if (err.code === 'HOST_UNTRUSTED') {
         const fingerprint = err.message.match(/SHA256:[A-Za-z0-9+/=]+/)?.[0];
         if (fingerprint && window.confirm(`Unknown host. Trust ${fingerprint}?`)) {
-          await connection.trustHost(profile.host, fingerprint);
+          await connection.trustHost(parsed.host, fingerprint);
           await connect();
           return;
         }
@@ -339,7 +396,7 @@ function App() {
     void loadDirectory(entry.path);
   };
 
-  const canConnect = Boolean(profile.host && profile.username && profile.privateKeyContent);
+  const canConnect = Boolean(parseTarget(target) && profile.privateKeyContent);
 
   return (
     <div className="os-shell">
@@ -358,44 +415,19 @@ function App() {
             <div className="connect-header">
               <div>
                 <span className="eyebrow">VM Desktop</span>
-                <h1>Connect to VM</h1>
+                <h1>Quick Connect</h1>
               </div>
               <span className="pc-badge">10</span>
             </div>
 
-            <div className="form-grid">
-              <label>
-                Host
-                <input
-                  value={profile.host}
-                  onChange={(e) => setProfile({ ...profile, host: e.target.value })}
-                  placeholder="w.x.y.z"
-                />
-              </label>
-              <label>
-                Port
-                <input
-                  type="number"
-                  value={profile.port}
-                  onChange={(e) => setProfile({ ...profile, port: Number(e.target.value) })}
-                />
-              </label>
-              <label>
-                Username
-                <input
-                  value={profile.username}
-                  onChange={(e) => setProfile({ ...profile, username: e.target.value })}
-                  placeholder="ubuntu"
-                />
-              </label>
-              <label>
-                Name
-                <input
-                  value={profile.name}
-                  onChange={(e) => setProfile({ ...profile, name: e.target.value })}
-                />
-              </label>
-            </div>
+            <label className="target-field">
+              SSH target
+              <input
+                value={target}
+                onChange={(e) => setTarget(e.target.value)}
+                placeholder="ubuntu@w.x.y.z"
+              />
+            </label>
 
             <label className="key-picker">
               <input
