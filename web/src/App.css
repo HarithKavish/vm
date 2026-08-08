@@ -58,9 +58,9 @@ button:disabled {
 }
 
 .desktop-shortcut {
+  position: absolute;
   width: 96px;
   min-height: 82px;
-  margin: 0 0 12px;
   border: 1px solid transparent;
   border-radius: 3px;
   background: transparent;
@@ -71,6 +71,8 @@ button:disabled {
   justify-content: center;
   gap: 8px;
   text-shadow: 0 1px 2px rgba(0, 0, 0, 0.65);
+  touch-action: none;
+  user-select: none;
 }
 
 .desktop-shortcut:hover,
@@ -85,10 +87,10 @@ button:disabled {
   opacity: 0.48;
 }
 
-.terminal-shortcut {
-  position: absolute;
-  top: 112px;
-  left: 18px;
+.desktop-shortcut.is-dragging {
+  z-index: 20;
+  border-color: rgba(255, 255, 255, 0.5);
+  background: rgba(255, 255, 255, 0.18);
 }
 
 .shortcut-icon,
@@ -144,8 +146,23 @@ button:disabled {
   transform: rotate(-45deg);
 }
 
+.settings-icon {
+  position: relative;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: conic-gradient(#8de0bd 0 25%, #6fb7e0 0 50%, #e0b46f 0 75%, #e08d8d 0 100%);
+}
+
+.settings-icon::before {
+  position: absolute;
+  inset: 8px;
+  border-radius: 50%;
+  content: "";
+  background: #111820;
+}
+
 .connect-panel,
-.session-card,
 .app-window {
   border: 1px solid rgba(255, 255, 255, 0.38);
   box-shadow: 0 24px 80px rgba(0, 0, 0, 0.34);
@@ -261,7 +278,6 @@ button:disabled {
 }
 
 .connect-button,
-.session-card button,
 .explorer-toolbar button {
   min-height: 38px;
   border: 0;
@@ -282,31 +298,6 @@ button:disabled {
   font-size: 0.86rem;
 }
 
-.session-card {
-  position: absolute;
-  top: 18px;
-  right: 18px;
-  width: min(340px, calc(100vw - 36px));
-  border-radius: 5px;
-  background: rgba(242, 247, 251, 0.88);
-  color: #17212b;
-  display: grid;
-  grid-template-columns: 1fr auto;
-  gap: 4px 12px;
-  padding: 14px;
-}
-
-.session-card span {
-  color: #536270;
-  font-size: 0.84rem;
-}
-
-.session-card button {
-  grid-row: 1 / span 2;
-  grid-column: 2;
-  background: #2f4254;
-}
-
 .app-window {
   position: absolute;
   width: min(980px, calc(100vw - 166px));
@@ -318,6 +309,8 @@ button:disabled {
   flex-direction: column;
   overflow: hidden;
   z-index: 5;
+  transform-origin: 64px calc(100% - 24px);
+  transition: transform 0.18s cubic-bezier(0.2, 0.7, 0.3, 1), opacity 0.18s ease;
 }
 
 .app-window.is-focused {
@@ -334,8 +327,19 @@ button:disabled {
   border-radius: 0;
 }
 
+.app-window.is-minimized {
+  opacity: 0;
+  transform: scale(0.15) translateY(40vh);
+  pointer-events: none;
+}
+
 .terminal-window {
   width: min(900px, calc(100vw - 166px));
+}
+
+.settings-window {
+  width: min(620px, calc(100vw - 96px));
+  height: min(520px, calc(100vh - 112px));
 }
 
 .window-titlebar {
@@ -509,9 +513,90 @@ button:disabled {
   background: #0c1016;
 }
 
+.settings-body {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px 24px;
+}
+
+.settings-body h2 {
+  margin: 0 0 6px;
+  font-size: 1.1rem;
+}
+
+.settings-hint {
+  margin: 0 0 16px;
+  color: #536270;
+  font-size: 0.86rem;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
+.settings-row button {
+  min-height: 36px;
+  border: 0;
+  border-radius: 3px;
+  background: #0078d4;
+  color: #fff;
+  padding: 0 14px;
+  font-weight: 600;
+}
+
+.settings-row .settings-secondary {
+  background: #5c6b7a;
+}
+
+.settings-folder-label {
+  color: #536270;
+  font-size: 0.84rem;
+}
+
+.settings-status {
+  margin: 4px 0 16px;
+  color: #536270;
+  font-size: 0.84rem;
+}
+
+.wallpaper-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.wallpaper-thumb {
+  border: 2px solid transparent;
+  border-radius: 4px;
+  padding: 0;
+  overflow: hidden;
+  aspect-ratio: 16 / 10;
+  background: #eef1f3;
+}
+
+.wallpaper-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.wallpaper-thumb:hover {
+  border-color: #0078d4;
+}
+
+.wallpaper-thumb.is-active {
+  border-color: #0078d4;
+  box-shadow: 0 0 0 2px rgba(0, 120, 212, 0.35);
+}
+
 .taskbar {
   position: relative;
-  z-index: 2;
+  z-index: 12;
   height: 48px;
   border-top: 1px solid rgba(255, 255, 255, 0.18);
   background: rgba(21, 31, 43, 0.82);
@@ -542,18 +627,105 @@ button:disabled {
   padding: 0;
 }
 
-.start-button span {
-  width: 22px;
-  height: 22px;
-  background:
-    linear-gradient(90deg, #fff 0 46%, transparent 46% 54%, #fff 54%),
-    linear-gradient(0deg, #fff 0 46%, transparent 46% 54%, #fff 54%);
+.start-icon {
+  width: 26px;
+  height: 26px;
+  border-radius: 6px;
+  display: block;
 }
 
 .taskbar-app:hover,
 .taskbar-app.is-active,
-.start-button:hover {
+.start-button:hover,
+.start-button.is-active {
   background: rgba(255, 255, 255, 0.15);
+}
+
+.start-menu {
+  position: absolute;
+  left: 8px;
+  bottom: 56px;
+  width: 320px;
+  border: 1px solid rgba(255, 255, 255, 0.38);
+  border-radius: 7px;
+  background: rgba(30, 40, 52, 0.92);
+  backdrop-filter: blur(20px);
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.44);
+  color: #fff;
+  overflow: hidden;
+  animation: start-menu-in 0.16s cubic-bezier(0.2, 0.7, 0.3, 1);
+}
+
+@keyframes start-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.start-menu-status {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 10px;
+  padding: 16px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.14);
+}
+
+.start-menu-status > div {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.start-menu-status strong {
+  font-size: 0.92rem;
+}
+
+.start-menu-status span {
+  color: rgba(255, 255, 255, 0.65);
+  font-size: 0.78rem;
+}
+
+.start-menu-status button {
+  min-height: 32px;
+  border: 0;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  padding: 0 12px;
+}
+
+.start-menu-status button:hover {
+  background: rgba(255, 255, 255, 0.26);
+}
+
+.start-menu-apps {
+  display: flex;
+  flex-direction: column;
+  padding: 8px;
+  gap: 2px;
+}
+
+.start-menu-apps button {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 40px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #fff;
+  padding: 0 10px;
+  text-align: left;
+}
+
+.start-menu-apps button:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
 }
 
 .taskbar-app:disabled {
@@ -610,16 +782,11 @@ button:disabled {
     font-size: 1.45rem;
   }
 
-  .session-card,
   .app-window {
     left: 10px;
     right: 10px;
     top: 10px;
     width: auto;
-  }
-
-  .session-card {
-    display: none;
   }
 
   .app-window {
@@ -664,5 +831,16 @@ button:disabled {
 
   .taskbar-app span:last-child {
     display: none;
+  }
+
+  .start-menu {
+    width: calc(100vw - 16px);
+    left: 8px;
+  }
+
+  .settings-window {
+    left: 10px;
+    right: 10px;
+    width: auto;
   }
 }

@@ -3,6 +3,7 @@ import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
 import './App.css';
+import startIcon from './assets/start-icon.svg';
 import {
   ExtensionVMConnection,
   type ConnectionProfile,
@@ -10,7 +11,7 @@ import {
   VMConnectionError,
 } from './connection';
 
-type WindowId = 'terminal' | 'files';
+type AppId = 'files' | 'terminal' | 'settings';
 type WindowState = {
   closed: boolean;
   minimized: boolean;
@@ -18,22 +19,55 @@ type WindowState = {
   x: number;
   y: number;
 };
+type IconPosition = { x: number; y: number };
 
-const defaultWindows: Record<WindowId, WindowState> = {
-  files: {
-    closed: false,
-    minimized: false,
-    maximized: false,
-    x: 132,
-    y: 34,
-  },
-  terminal: {
-    closed: true,
-    minimized: false,
-    maximized: false,
-    x: 176,
-    y: 78,
-  },
+type AppDescriptor = {
+  id: AppId;
+  name: string;
+  iconClass: string;
+  requiresConnection: boolean;
+};
+
+const APPS: AppDescriptor[] = [
+  { id: 'files', name: 'File Explorer', iconClass: 'folder-icon', requiresConnection: true },
+  { id: 'terminal', name: 'Terminal', iconClass: 'terminal-icon', requiresConnection: true },
+  { id: 'settings', name: 'Settings', iconClass: 'settings-icon', requiresConnection: false },
+];
+
+const defaultWindows: Record<AppId, WindowState> = {
+  files: { closed: false, minimized: false, maximized: false, x: 132, y: 34 },
+  terminal: { closed: true, minimized: false, maximized: false, x: 176, y: 78 },
+  settings: { closed: true, minimized: false, maximized: false, x: 210, y: 60 },
+};
+
+const ICON_GRID_X = 108;
+const ICON_GRID_Y = 104;
+const ICON_ORIGIN_X = 18;
+const ICON_ORIGIN_Y = 18;
+
+const defaultIconPositions: Record<AppId, IconPosition> = {
+  files: { x: ICON_ORIGIN_X, y: ICON_ORIGIN_Y },
+  terminal: { x: ICON_ORIGIN_X, y: ICON_ORIGIN_Y + ICON_GRID_Y },
+  settings: { x: ICON_ORIGIN_X, y: ICON_ORIGIN_Y + ICON_GRID_Y * 2 },
+};
+
+const ICON_POSITIONS_KEY = 'vm-desktop-icon-positions';
+const WALLPAPER_KEY = 'vm-desktop-wallpaper';
+
+const snapToGrid = (value: number, grid: number, origin: number) =>
+  Math.max(origin, origin + Math.round((value - origin) / grid) * grid);
+
+const loadIconPositions = (): Record<AppId, IconPosition> => {
+  try {
+    const raw = window.localStorage.getItem(ICON_POSITIONS_KEY);
+    if (!raw) {
+      return defaultIconPositions;
+    }
+    const parsed = JSON.parse(raw) as Partial<Record<AppId, IconPosition>>;
+    return { ...defaultIconPositions, ...parsed };
+  } catch {
+    return defaultIconPositions;
+  }
 };
 
 const defaultProfile: ConnectionProfile = {
@@ -75,6 +109,24 @@ const formatTime = () =>
     hour: '2-digit',
     minute: '2-digit',
   }).format(new Date());
+
+type DirectoryHandleLike = {
+  values(): AsyncIterable<{ kind: string; name: string; getFile?: () => Promise<File> }>;
+};
+
+const pickLocalDirectory = (): Promise<DirectoryHandleLike> | null => {
+  const picker = (window as unknown as { showDirectoryPicker?: () => Promise<DirectoryHandleLike> })
+    .showDirectoryPicker;
+  return picker ? picker() : null;
+};
+
+const readFileAsDataUrl = (file: File): Promise<string> =>
+  new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 
 const useTerminal = (
   onCommand: (command: string) => Promise<string>,
@@ -143,7 +195,7 @@ const useTerminal = (
         prompt();
         return;
       }
-      if (data === '\u007f') {
+      if (data === '') {
         if (input.length > 0) {
           input = input.slice(0, -1);
           terminal.write('\b \b');
@@ -181,12 +233,20 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState('Choose a key');
   const [error, setError] = useState('');
-  const [active, setActive] = useState<WindowId>('files');
+  const [active, setActive] = useState<AppId>('files');
   const [windows, setWindows] = useState(defaultWindows);
   const [path, setPath] = useState('/');
+  const [addressInput, setAddressInput] = useState('/');
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [clock, setClock] = useState(formatTime);
+  const [startOpen, setStartOpen] = useState(false);
+  const [iconPositions, setIconPositions] = useState<Record<AppId, IconPosition>>(loadIconPositions);
+  const [wallpaper, setWallpaper] = useState(() => window.localStorage.getItem(WALLPAPER_KEY) ?? '');
+  const [wallpaperFolder, setWallpaperFolder] = useState('');
+  const [wallpaperImages, setWallpaperImages] = useState<{ name: string; url: string }[]>([]);
+  const [wallpaperStatus, setWallpaperStatus] = useState('');
   const connection = useMemo(() => new ExtensionVMConnection(), []);
+  const startMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const id = window.setInterval(() => setClock(formatTime()), 30_000);
@@ -208,6 +268,31 @@ function App() {
     }));
   }, [target]);
 
+  useEffect(() => {
+    window.localStorage.setItem(ICON_POSITIONS_KEY, JSON.stringify(iconPositions));
+  }, [iconPositions]);
+
+  useEffect(() => {
+    if (wallpaper) {
+      window.localStorage.setItem(WALLPAPER_KEY, wallpaper);
+    } else {
+      window.localStorage.removeItem(WALLPAPER_KEY);
+    }
+  }, [wallpaper]);
+
+  useEffect(() => {
+    if (!startOpen) {
+      return;
+    }
+    const onPointerDown = (event: PointerEvent) => {
+      if (startMenuRef.current && !startMenuRef.current.contains(event.target as Node)) {
+        setStartOpen(false);
+      }
+    };
+    window.addEventListener('pointerdown', onPointerDown);
+    return () => window.removeEventListener('pointerdown', onPointerDown);
+  }, [startOpen]);
+
   const execute = async (command: string): Promise<string> => {
     try {
       return await connection.executeCommand(command);
@@ -220,8 +305,9 @@ function App() {
 
   const terminalRef = useTerminal(execute, connected, error);
 
-  const openWindow = (id: WindowId) => {
+  const openWindow = (id: AppId) => {
     setActive(id);
+    setStartOpen(false);
     setWindows((current) => ({
       ...current,
       [id]: {
@@ -232,7 +318,7 @@ function App() {
     }));
   };
 
-  const minimizeWindow = (id: WindowId) => {
+  const minimizeWindow = (id: AppId) => {
     setWindows((current) => ({
       ...current,
       [id]: {
@@ -242,7 +328,7 @@ function App() {
     }));
   };
 
-  const maximizeWindow = (id: WindowId) => {
+  const maximizeWindow = (id: AppId) => {
     setActive(id);
     setWindows((current) => ({
       ...current,
@@ -254,7 +340,7 @@ function App() {
     }));
   };
 
-  const closeWindow = (id: WindowId) => {
+  const closeWindow = (id: AppId) => {
     setWindows((current) => ({
       ...current,
       [id]: {
@@ -266,7 +352,7 @@ function App() {
     }));
   };
 
-  const beginDrag = (id: WindowId, event: ReactPointerEvent<HTMLElement>) => {
+  const beginDrag = (id: AppId, event: ReactPointerEvent<HTMLElement>) => {
     if (windows[id].maximized || event.button !== 0) {
       return;
     }
@@ -302,6 +388,65 @@ function App() {
     window.addEventListener('pointerup', stopDrag);
   };
 
+  const beginIconDrag = (id: AppId, event: ReactPointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) {
+      return;
+    }
+
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startPos = iconPositions[id];
+    const pointerId = event.pointerId;
+    const target = event.currentTarget;
+    let dragged = false;
+
+    const movePointer = (moveEvent: PointerEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      if (!dragged && Math.hypot(dx, dy) > 4) {
+        dragged = true;
+        target.setPointerCapture(pointerId);
+        target.classList.add('is-dragging');
+      }
+      if (!dragged) {
+        return;
+      }
+      setIconPositions((current) => ({
+        ...current,
+        [id]: { x: Math.max(4, startPos.x + dx), y: Math.max(4, startPos.y + dy) },
+      }));
+    };
+
+    const stopDrag = () => {
+      window.removeEventListener('pointermove', movePointer);
+      window.removeEventListener('pointerup', stopDrag);
+      target.classList.remove('is-dragging');
+      if (dragged) {
+        target.releasePointerCapture(pointerId);
+        setIconPositions((current) => ({
+          ...current,
+          [id]: {
+            x: snapToGrid(current[id].x, ICON_GRID_X, ICON_ORIGIN_X),
+            y: snapToGrid(current[id].y, ICON_GRID_Y, ICON_ORIGIN_Y),
+          },
+        }));
+        // Suppress the click that follows pointerup after a real drag.
+        target.dataset.suppressClick = '1';
+      }
+    };
+
+    window.addEventListener('pointermove', movePointer);
+    window.addEventListener('pointerup', stopDrag);
+  };
+
+  const handleIconClick = (id: AppId, event: React.MouseEvent<HTMLButtonElement>) => {
+    if (event.currentTarget.dataset.suppressClick) {
+      delete event.currentTarget.dataset.suppressClick;
+      return;
+    }
+    openWindow(id);
+  };
+
   const loadDirectory = async (nextPath = path) => {
     if (!connected) {
       return;
@@ -310,6 +455,7 @@ function App() {
       const list = await connection.listDirectory(nextPath);
       setEntries(list);
       setPath(nextPath);
+      setAddressInput(nextPath);
     } catch (e) {
       const err = e as VMConnectionError;
       setError(`${err.code}: ${err.message}`);
@@ -353,6 +499,7 @@ function App() {
       const list = await connection.listDirectory('/');
       setEntries(list);
       setPath('/');
+      setAddressInput('/');
       setConnected(true);
       setActive('files');
       setProfile(nextProfile);
@@ -396,19 +543,78 @@ function App() {
     void loadDirectory(entry.path);
   };
 
+  const chooseWallpaperFolder = async () => {
+    setWallpaperStatus('');
+    const pending = pickLocalDirectory();
+    if (!pending) {
+      setWallpaperStatus('This browser does not support choosing a local folder.');
+      return;
+    }
+    try {
+      const dirHandle = await pending;
+      const images: { name: string; url: string }[] = [];
+      for await (const entry of dirHandle.values()) {
+        if (entry.kind !== 'file' || !entry.getFile) {
+          continue;
+        }
+        const file = await entry.getFile();
+        if (!file.type.startsWith('image/')) {
+          continue;
+        }
+        images.push({ name: file.name, url: URL.createObjectURL(file) });
+      }
+      setWallpaperImages(images);
+      setWallpaperFolder('Selected folder');
+      setWallpaperStatus(images.length ? `${images.length} image(s) found.` : 'No images found in this folder.');
+    } catch {
+      setWallpaperStatus('Folder selection was cancelled or failed.');
+    }
+  };
+
+  const applyWallpaper = async (image: { name: string; url: string }) => {
+    try {
+      const response = await fetch(image.url);
+      const blob = await response.blob();
+      const dataUrl = await readFileAsDataUrl(new File([blob], image.name, { type: blob.type }));
+      setWallpaper(dataUrl);
+      setWallpaperStatus(`Wallpaper set to ${image.name}.`);
+    } catch {
+      setWallpaperStatus('Could not apply that image as wallpaper.');
+    }
+  };
+
   const canConnect = Boolean(parseTarget(target) && profile.privateKeyContent);
 
+  const windowClassName = (id: AppId, extra: string) =>
+    [
+      'app-window',
+      extra,
+      active === id ? 'is-focused' : '',
+      windows[id].maximized ? 'is-maximized' : '',
+      windows[id].minimized ? 'is-minimized' : '',
+    ]
+      .filter(Boolean)
+      .join(' ');
+
   return (
-    <div className="os-shell">
+    <div
+      className="os-shell"
+      style={wallpaper ? { backgroundImage: `url(${wallpaper})`, backgroundSize: 'cover', backgroundPosition: 'center' } : undefined}
+    >
       <main className="desktop-surface">
-        <button className="desktop-shortcut" onClick={() => openWindow('files')} disabled={!connected}>
-          <span className="shortcut-icon folder-icon" />
-          <span>File Explorer</span>
-        </button>
-        <button className="desktop-shortcut terminal-shortcut" onClick={() => openWindow('terminal')} disabled={!connected}>
-          <span className="shortcut-icon terminal-icon" />
-          <span>Terminal</span>
-        </button>
+        {APPS.map((app) => (
+          <button
+            key={app.id}
+            className="desktop-shortcut"
+            style={{ left: iconPositions[app.id].x, top: iconPositions[app.id].y }}
+            onPointerDown={(event) => beginIconDrag(app.id, event)}
+            onClick={(event) => handleIconClick(app.id, event)}
+            disabled={app.requiresConnection && !connected}
+          >
+            <span className={`shortcut-icon ${app.iconClass}`} />
+            <span>{app.name}</span>
+          </button>
+        ))}
 
         {!connected && (
           <section className="connect-panel" aria-label="VM connection">
@@ -446,21 +652,9 @@ function App() {
           </section>
         )}
 
-        {connected && (
-          <section className="session-card">
-            <strong>{profile.name}</strong>
-            <span>{status}</span>
-            <button onClick={disconnect}>Disconnect</button>
-          </section>
-        )}
-
-        {connected && !windows.files.closed && !windows.files.minimized && (
+        {connected && !windows.files.closed && (
           <section
-            className={[
-              'app-window explorer-window',
-              active === 'files' ? 'is-focused' : '',
-              windows.files.maximized ? 'is-maximized' : '',
-            ].join(' ')}
+            className={windowClassName('files', 'explorer-window')}
             style={windows.files.maximized ? undefined : { left: windows.files.x, top: windows.files.y }}
             onPointerDown={() => setActive('files')}
           >
@@ -476,9 +670,17 @@ function App() {
               <button onClick={() => void loadDirectory('/')} disabled={!connected}>
                 Home
               </button>
-              <input value={path} onChange={(e) => setPath(e.target.value)} />
-              <button onClick={() => void loadDirectory()} disabled={!connected}>
-                Refresh
+              <input
+                value={addressInput}
+                onChange={(e) => setAddressInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    void loadDirectory(addressInput);
+                  }
+                }}
+              />
+              <button onClick={() => void loadDirectory(addressInput)} disabled={!connected}>
+                Go
               </button>
             </div>
             <div className="explorer-body">
@@ -489,7 +691,12 @@ function App() {
               </aside>
               <ul className="file-list">
                 {entries.map((entry) => (
-                  <li key={entry.path} onDoubleClick={() => openFilePath(entry)}>
+                  <li
+                    key={entry.path}
+                    className={entry.isDirectory ? 'is-directory' : ''}
+                    onClick={() => openFilePath(entry)}
+                    onDoubleClick={() => openFilePath(entry)}
+                  >
                     <span className={entry.isDirectory ? 'file-icon is-folder' : 'file-icon'} />
                     <span>{entry.name}</span>
                     <small>{entry.permissions}</small>
@@ -507,13 +714,9 @@ function App() {
           </section>
         )}
 
-        {connected && !windows.terminal.closed && !windows.terminal.minimized && (
+        {connected && !windows.terminal.closed && (
           <section
-            className={[
-              'app-window terminal-window',
-              active === 'terminal' ? 'is-focused' : '',
-              windows.terminal.maximized ? 'is-maximized' : '',
-            ].join(' ')}
+            className={windowClassName('terminal', 'terminal-window')}
             style={windows.terminal.maximized ? undefined : { left: windows.terminal.x, top: windows.terminal.y }}
             onPointerDown={() => setActive('terminal')}
           >
@@ -528,31 +731,101 @@ function App() {
             <div ref={terminalRef} className="terminal" />
           </section>
         )}
+
+        {!windows.settings.closed && (
+          <section
+            className={windowClassName('settings', 'settings-window')}
+            style={windows.settings.maximized ? undefined : { left: windows.settings.x, top: windows.settings.y }}
+            onPointerDown={() => setActive('settings')}
+          >
+            <header className="window-titlebar" onPointerDown={(event) => beginDrag('settings', event)}>
+              <span>Settings</span>
+              <div className="window-controls">
+                <button aria-label="Minimize" onPointerDown={(event) => event.stopPropagation()} onClick={() => minimizeWindow('settings')} />
+                <button aria-label="Maximize" onPointerDown={(event) => event.stopPropagation()} onClick={() => maximizeWindow('settings')} />
+                <button aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeWindow('settings')} />
+              </div>
+            </header>
+            <div className="settings-body">
+              <h2>Personalization</h2>
+              <p className="settings-hint">Choose a folder on your PC to browse its images and set one as your wallpaper.</p>
+              <div className="settings-row">
+                <button onClick={() => void chooseWallpaperFolder()}>Choose folder</button>
+                {wallpaperFolder && <span className="settings-folder-label">{wallpaperFolder}</span>}
+                {wallpaper && (
+                  <button className="settings-secondary" onClick={() => setWallpaper('')}>
+                    Clear wallpaper
+                  </button>
+                )}
+              </div>
+              {wallpaperStatus && <p className="settings-status">{wallpaperStatus}</p>}
+              {wallpaperImages.length > 0 && (
+                <div className="wallpaper-grid">
+                  {wallpaperImages.map((image) => (
+                    <button
+                      key={image.url}
+                      className={wallpaper && image.url === wallpaper ? 'wallpaper-thumb is-active' : 'wallpaper-thumb'}
+                      onClick={() => void applyWallpaper(image)}
+                      title={image.name}
+                    >
+                      <img src={image.url} alt={image.name} loading="lazy" />
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </section>
+        )}
       </main>
 
       <footer className="taskbar">
-        <button className="start-button" aria-label="Start">
-          <span />
-        </button>
         <button
-          className={active === 'files' && !windows.files.minimized ? 'taskbar-app is-active' : 'taskbar-app'}
-          onClick={() => openWindow('files')}
-          disabled={!connected}
+          className={startOpen ? 'start-button is-active' : 'start-button'}
+          aria-label="Start"
+          onClick={() => setStartOpen((open) => !open)}
         >
-          <span className="task-icon folder-icon" />
-          <span>File Explorer</span>
+          <img src={startIcon} alt="" className="start-icon" />
         </button>
-        <button
-          className={active === 'terminal' && !windows.terminal.minimized ? 'taskbar-app is-active' : 'taskbar-app'}
-          onClick={() => openWindow('terminal')}
-          disabled={!connected}
-        >
-          <span className="task-icon terminal-icon" />
-          <span>Terminal</span>
-        </button>
+        {APPS.filter((app) => app.id !== 'settings').map((app) => (
+          <button
+            key={app.id}
+            className={active === app.id && !windows[app.id].minimized ? 'taskbar-app is-active' : 'taskbar-app'}
+            onClick={() => openWindow(app.id)}
+            disabled={app.requiresConnection && !connected}
+          >
+            <span className={`task-icon ${app.iconClass}`} />
+            <span>{app.name}</span>
+          </button>
+        ))}
         <div className="taskbar-spacer" />
-        <span className={connected ? 'network is-online' : 'network'} />
         <time>{clock}</time>
+
+        {startOpen && (
+          <div className="start-menu" ref={startMenuRef}>
+            <div className="start-menu-status">
+              <span className={connected ? 'network is-online' : 'network'} />
+              <div>
+                <strong>{connected ? profile.name : 'Not connected'}</strong>
+                <span>{status}</span>
+              </div>
+              {connected && (
+                <button onClick={() => void disconnect()}>Disconnect</button>
+              )}
+            </div>
+            <div className="start-menu-apps">
+              {APPS.map((app) => (
+                <button
+                  key={app.id}
+                  onClick={() => openWindow(app.id)}
+                  disabled={app.requiresConnection && !connected}
+                >
+                  <span className={`shortcut-icon ${app.iconClass}`} />
+                  <span>{app.name}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </footer>
     </div>
   );
