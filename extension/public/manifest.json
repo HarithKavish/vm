@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "VM Desktop Bridge",
+  "version": "0.1.0",
+  "description": "Native messaging bridge for vm.harithkavish.com",
+  "permissions": ["nativeMessaging", "storage"],
+  "host_permissions": ["https://vm.harithkavish.com/*", "http://localhost:5173/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://vm.harithkavish.com/*", "http://localhost:5173/*"],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "externally_connectable": {
+    "matches": ["https://vm.harithkavish.com/*", "http://localhost:5173/*"]
+  }
+}
