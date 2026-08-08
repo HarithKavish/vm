@@ -13,7 +13,12 @@ html,
 #root {
   margin: 0;
   width: 100%;
-  min-height: 100vh;
+  height: 100%;
+  overflow: hidden;
+}
+
+html {
+  height: 100vh;
 }
 
 button,
@@ -31,7 +36,9 @@ button:disabled {
 }
 
 .os-shell {
-  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
   overflow: hidden;
   background:
     radial-gradient(circle at 15% 20%, rgba(255, 255, 255, 0.34), transparent 11rem),
@@ -40,7 +47,8 @@ button:disabled {
 
 .desktop-surface {
   position: relative;
-  min-height: calc(100vh - 48px);
+  flex: 1 1 auto;
+  min-height: 0;
   padding: 18px;
   isolation: isolate;
 }
@@ -312,8 +320,10 @@ button:disabled {
 
 .app-window {
   position: absolute;
-  width: min(980px, calc(100vw - 166px));
-  height: min(680px, calc(100vh - 112px));
+  /* Sized as % of .desktop-surface (its containing block) rather than vw/vh, so a
+     stray document scrollbar can't desync these from the actually visible area. */
+  width: min(980px, calc(100% - 40px));
+  height: min(680px, calc(100% - 40px));
   border-radius: 5px;
   background: rgba(250, 252, 254, 0.95);
   color: #111820;
@@ -332,10 +342,9 @@ button:disabled {
 }
 
 .app-window.is-maximized {
-  left: 8px;
-  top: 8px;
-  width: calc(100vw - 16px);
-  height: calc(100vh - 64px);
+  inset: 8px;
+  width: auto;
+  height: auto;
   border-radius: 0;
 }
 
@@ -346,12 +355,12 @@ button:disabled {
 }
 
 .terminal-window {
-  width: min(900px, calc(100vw - 166px));
+  width: min(900px, calc(100% - 40px));
 }
 
 .settings-window {
-  width: min(620px, calc(100vw - 96px));
-  height: min(520px, calc(100vh - 112px));
+  width: min(620px, calc(100% - 40px));
+  height: min(520px, calc(100% - 40px));
 }
 
 .window-titlebar {
@@ -623,6 +632,7 @@ button:disabled {
 .taskbar {
   position: relative;
   z-index: 12;
+  flex-shrink: 0;
   height: 48px;
   border-top: 1px solid rgba(255, 255, 255, 0.18);
   background: rgba(21, 31, 43, 0.82);
@@ -790,7 +800,6 @@ button:disabled {
 
 @media (max-width: 760px) {
   .desktop-surface {
-    min-height: calc(100vh - 56px);
     padding: 10px;
   }
 
@@ -812,18 +821,13 @@ button:disabled {
     left: 10px;
     right: 10px;
     top: 10px;
+    bottom: 10px;
     width: auto;
-  }
-
-  .app-window {
-    height: calc(100vh - 76px);
+    height: auto;
   }
 
   .app-window.is-maximized {
-    left: 0;
-    top: 0;
-    width: 100vw;
-    height: calc(100vh - 56px);
+    inset: 0;
   }
 
   .explorer-toolbar {
