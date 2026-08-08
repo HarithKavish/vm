@@ -503,7 +503,7 @@ func hostManifestPath() string {
 	case "darwin":
 		return filepath.Join(os.Getenv("HOME"), "Library", "Application Support", "Google", "Chrome", "NativeMessagingHosts", "com.harith.vm_desktop.json")
 	case "windows":
-		return `%LOCALAPPDATA%\\Google\\Chrome\\User Data\\NativeMessagingHosts\\com.harith.vm_desktop.json`
+		return filepath.Join(os.Getenv("LOCALAPPDATA"), "VMDesktop", "native-companion", "com.harith.vm_desktop.json")
 	default:
 		return filepath.Join(os.Getenv("HOME"), ".config", "google-chrome", "NativeMessagingHosts", "com.harith.vm_desktop.json")
 	}

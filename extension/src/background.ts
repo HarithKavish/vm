@@ -3,14 +3,19 @@ import { HOST_NAME, TRUSTED_ORIGINS, type NativeRequest, type NativeResponse } f
 const withNativeHost = async (request: NativeRequest): Promise<NativeResponse> => {
   try {
     const response = (await chrome.runtime.sendNativeMessage(HOST_NAME, request)) as NativeResponse;
+    if (chrome.runtime.lastError) {
+      throw new Error(chrome.runtime.lastError.message);
+    }
     return response;
-  } catch {
+  } catch (err) {
+    const detail = chrome.runtime.lastError?.message ?? (err instanceof Error ? err.message : String(err));
+    console.error(`[vm-desktop] sendNativeMessage(${HOST_NAME}) failed: ${detail}`);
     return {
       requestId: request.requestId,
       ok: false,
       error: {
         code: 'NATIVE_HOST_UNAVAILABLE',
-        message: 'Native companion is not installed or unreachable.',
+        message: detail || 'Native companion is not installed or unreachable.',
       },
     };
   }

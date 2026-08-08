@@ -3,5 +3,6 @@
   "description": "VM Desktop native SSH companion",
   "path": "/absolute/path/to/vm-desktop-companion",
   "type": "stdio",
-  "allowed_origins": ["chrome-extension://<EXTENSION_ID>/"]
+  "allowed_origins": ["chrome-extension://mkceajnjaipdpkegbgponncjaknnnece/"]
 }
+
