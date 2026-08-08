@@ -5,6 +5,8 @@ export type ConnectionProfile = {
   port: number;
   username: string;
   privateKeyPath?: string;
+  privateKeyContent?: string;
+  privateKeyName?: string;
 };
 
 export type NativeRequest = {

@@ -14,11 +14,17 @@ type WindowId = 'terminal' | 'files';
 
 const defaultProfile: ConnectionProfile = {
   id: 'local',
-  name: 'My VM',
+  name: 'Ubuntu VM',
   host: '',
   port: 22,
   username: 'ubuntu',
 };
+
+const formatTime = () =>
+  new Intl.DateTimeFormat(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date());
 
 const useTerminal = (
   onCommand: (command: string) => Promise<string>,
@@ -28,6 +34,17 @@ const useTerminal = (
   const ref = useRef<HTMLDivElement | null>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
+  const connectedRef = useRef(connected);
+  const commandRef = useRef(onCommand);
+
+  useEffect(() => {
+    connectedRef.current = connected;
+    terminalRef.current?.writeln(connected ? '\r\n[vm] connected' : '\r\n[vm] disconnected');
+  }, [connected]);
+
+  useEffect(() => {
+    commandRef.current = onCommand;
+  }, [onCommand]);
 
   useEffect(() => {
     if (!ref.current || terminalRef.current) {
@@ -37,8 +54,13 @@ const useTerminal = (
     const terminal = new Terminal({
       convertEol: true,
       cursorBlink: true,
+      fontFamily: 'Cascadia Mono, Consolas, monospace',
+      fontSize: 13,
       theme: {
-        background: '#0f172a',
+        background: '#0c1016',
+        foreground: '#f2f4f8',
+        cursor: '#ffffff',
+        green: '#6ce38a',
       },
     });
     const fitAddon = new FitAddon();
@@ -49,13 +71,13 @@ const useTerminal = (
     fitRef.current = fitAddon;
 
     let input = '';
-    const prompt = () => terminal.write('\r\n$ ');
+    const prompt = () => terminal.write('\r\nubuntu@vm:~$ ');
 
     terminal.write('VM Desktop Terminal');
     prompt();
 
     terminal.onData(async (data) => {
-      if (!connected) {
+      if (!connectedRef.current) {
         return;
       }
       if (data === '\r') {
@@ -66,7 +88,7 @@ const useTerminal = (
           prompt();
           return;
         }
-        const output = await onCommand(command);
+        const output = await commandRef.current(command);
         terminal.write(output || '(no output)');
         prompt();
         return;
@@ -91,7 +113,7 @@ const useTerminal = (
       terminalRef.current = null;
       fitRef.current = null;
     };
-  }, [connected, onCommand]);
+  }, []);
 
   useEffect(() => {
     if (!terminalRef.current || !error) {
@@ -106,13 +128,18 @@ const useTerminal = (
 function App() {
   const [profile, setProfile] = useState<ConnectionProfile>(defaultProfile);
   const [connected, setConnected] = useState(false);
-  const [status, setStatus] = useState('Disconnected');
+  const [status, setStatus] = useState('Choose a key');
   const [error, setError] = useState('');
-  const [active, setActive] = useState<WindowId>('terminal');
+  const [active, setActive] = useState<WindowId>('files');
   const [path, setPath] = useState('/');
   const [entries, setEntries] = useState<FileEntry[]>([]);
-
+  const [clock, setClock] = useState(formatTime);
   const connection = useMemo(() => new ExtensionVMConnection(), []);
+
+  useEffect(() => {
+    const id = window.setInterval(() => setClock(formatTime()), 30_000);
+    return () => window.clearInterval(id);
+  }, []);
 
   const execute = async (command: string): Promise<string> => {
     try {
@@ -126,17 +153,34 @@ function App() {
 
   const terminalRef = useTerminal(execute, connected, error);
 
-  const loadDirectory = async () => {
+  const loadDirectory = async (nextPath = path) => {
     if (!connected) {
       return;
     }
     try {
-      const list = await connection.listDirectory(path);
+      const list = await connection.listDirectory(nextPath);
       setEntries(list);
+      setPath(nextPath);
     } catch (e) {
       const err = e as VMConnectionError;
       setError(`${err.code}: ${err.message}`);
     }
+  };
+
+  const handleKeyFile = async (file?: File) => {
+    if (!file) {
+      return;
+    }
+
+    const content = await file.text();
+    setProfile((current) => ({
+      ...current,
+      privateKeyContent: content,
+      privateKeyName: file.name,
+      privateKeyPath: '',
+    }));
+    setStatus(`${file.name} selected`);
+    setError('');
   };
 
   const connect = async () => {
@@ -144,9 +188,12 @@ function App() {
     setStatus('Connecting...');
     try {
       await connection.connect(profile, { userConsent: true });
+      const list = await connection.listDirectory('/');
+      setEntries(list);
+      setPath('/');
       setConnected(true);
-      setStatus(`Connected: ${profile.name}`);
-      await loadDirectory();
+      setActive('files');
+      setStatus(`Connected to ${profile.host}`);
     } catch (e) {
       const err = e as VMConnectionError;
       if (err.code === 'HOST_UNTRUSTED') {
@@ -157,6 +204,7 @@ function App() {
           return;
         }
       }
+      setConnected(false);
       setStatus('Disconnected');
       setError(`${err.code}: ${err.message}`);
     }
@@ -169,100 +217,171 @@ function App() {
     setEntries([]);
   };
 
+  const openFilePath = (entry: FileEntry) => {
+    if (!entry.isDirectory) {
+      return;
+    }
+    void loadDirectory(entry.path);
+  };
+
+  const canConnect = Boolean(profile.host && profile.username && profile.privateKeyContent);
+
   return (
-    <div className="desktop">
-      <aside className="launcher">
-        <h1>VM Desktop</h1>
-        <label>
-          Name
-          <input
-            value={profile.name}
-            onChange={(e) => setProfile({ ...profile, name: e.target.value })}
-          />
-        </label>
-        <label>
-          Host
-          <input
-            value={profile.host}
-            onChange={(e) => setProfile({ ...profile, host: e.target.value })}
-            placeholder="example.com"
-          />
-        </label>
-        <label>
-          Port
-          <input
-            type="number"
-            value={profile.port}
-            onChange={(e) => setProfile({ ...profile, port: Number(e.target.value) })}
-          />
-        </label>
-        <label>
-          Username
-          <input
-            value={profile.username}
-            onChange={(e) => setProfile({ ...profile, username: e.target.value })}
-          />
-        </label>
-        <label>
-          Key Path (local companion)
-          <input
-            value={profile.privateKeyPath ?? ''}
-            onChange={(e) => setProfile({ ...profile, privateKeyPath: e.target.value })}
-            placeholder="~/.ssh/id_ed25519"
-          />
-        </label>
+    <div className="os-shell">
+      <main className="desktop-surface">
+        <button className="desktop-shortcut" onClick={() => setActive('files')}>
+          <span className="shortcut-icon folder-icon" />
+          <span>File Explorer</span>
+        </button>
+        <button className="desktop-shortcut terminal-shortcut" onClick={() => setActive('terminal')}>
+          <span className="shortcut-icon terminal-icon" />
+          <span>Terminal</span>
+        </button>
 
-        <div className="actions">
-          <button onClick={connect} disabled={connected || !profile.host}>
-            Connect
-          </button>
-          <button onClick={disconnect} disabled={!connected}>
-            Disconnect
-          </button>
-        </div>
+        {!connected && (
+          <section className="connect-panel" aria-label="VM connection">
+            <div className="connect-header">
+              <div>
+                <span className="eyebrow">VM Desktop</span>
+                <h1>Connect to VM</h1>
+              </div>
+              <span className="pc-badge">10</span>
+            </div>
 
-        <nav className="apps">
-          <button onClick={() => setActive('terminal')}>🖥 Terminal</button>
-          <button onClick={() => setActive('files')}>📁 Files</button>
-        </nav>
-      </aside>
+            <div className="form-grid">
+              <label>
+                Host
+                <input
+                  value={profile.host}
+                  onChange={(e) => setProfile({ ...profile, host: e.target.value })}
+                  placeholder="w.x.y.z"
+                />
+              </label>
+              <label>
+                Port
+                <input
+                  type="number"
+                  value={profile.port}
+                  onChange={(e) => setProfile({ ...profile, port: Number(e.target.value) })}
+                />
+              </label>
+              <label>
+                Username
+                <input
+                  value={profile.username}
+                  onChange={(e) => setProfile({ ...profile, username: e.target.value })}
+                  placeholder="ubuntu"
+                />
+              </label>
+              <label>
+                Name
+                <input
+                  value={profile.name}
+                  onChange={(e) => setProfile({ ...profile, name: e.target.value })}
+                />
+              </label>
+            </div>
 
-      <main className="workspace">
-        {active === 'terminal' && (
-          <section className="window">
-            <header>Terminal</header>
-            <div ref={terminalRef} className="terminal" />
+            <label className="key-picker">
+              <input
+                type="file"
+                accept=".key,.pem,.txt"
+                onChange={(e) => void handleKeyFile(e.target.files?.[0])}
+              />
+              <span className="key-icon" />
+              <strong>{profile.privateKeyName ?? 'Choose VM key'}</strong>
+            </label>
+
+            <button className="connect-button" onClick={connect} disabled={!canConnect}>
+              Connect
+            </button>
+            {error && <p className="connect-error">{error}</p>}
+          </section>
+        )}
+
+        {connected && (
+          <section className="session-card">
+            <strong>{profile.name}</strong>
+            <span>{status}</span>
+            <button onClick={disconnect}>Disconnect</button>
           </section>
         )}
 
         {active === 'files' && (
-          <section className="window">
-            <header>
-              Files
-              <span>
-                <input value={path} onChange={(e) => setPath(e.target.value)} />
-                <button onClick={loadDirectory} disabled={!connected}>
-                  Refresh
-                </button>
-              </span>
+          <section className="app-window explorer-window">
+            <header className="window-titlebar">
+              <span>File Explorer</span>
+              <div className="window-controls">
+                <button aria-label="Minimize" />
+                <button aria-label="Maximize" />
+                <button aria-label="Close" />
+              </div>
             </header>
-            <ul className="files">
-              {entries.map((entry) => (
-                <li key={entry.path}>
-                  <span>{entry.isDirectory ? '📂' : '📄'} {entry.name}</span>
-                  <small>
-                    {entry.permissions} · {entry.size}B · {entry.modifiedAt}
-                  </small>
-                </li>
-              ))}
-            </ul>
+            <div className="explorer-toolbar">
+              <button onClick={() => void loadDirectory('/')} disabled={!connected}>
+                Home
+              </button>
+              <input value={path} onChange={(e) => setPath(e.target.value)} />
+              <button onClick={() => void loadDirectory()} disabled={!connected}>
+                Refresh
+              </button>
+            </div>
+            <div className="explorer-body">
+              <aside>
+                <button onClick={() => void loadDirectory('/')} disabled={!connected}>Root</button>
+                <button onClick={() => void loadDirectory('/home')} disabled={!connected}>Home</button>
+                <button onClick={() => void loadDirectory('/var/log')} disabled={!connected}>Logs</button>
+              </aside>
+              <ul className="file-list">
+                {entries.map((entry) => (
+                  <li key={entry.path} onDoubleClick={() => openFilePath(entry)}>
+                    <span className={entry.isDirectory ? 'file-icon is-folder' : 'file-icon'} />
+                    <span>{entry.name}</span>
+                    <small>{entry.permissions}</small>
+                    <small>{entry.size}B</small>
+                    <small>{entry.modifiedAt}</small>
+                  </li>
+                ))}
+                {entries.length === 0 && (
+                  <li className="empty-row">
+                    <span>{connected ? 'No files' : 'Connect to browse files'}</span>
+                  </li>
+                )}
+              </ul>
+            </div>
+          </section>
+        )}
+
+        {active === 'terminal' && (
+          <section className="app-window terminal-window">
+            <header className="window-titlebar">
+              <span>Terminal</span>
+              <div className="window-controls">
+                <button aria-label="Minimize" />
+                <button aria-label="Maximize" />
+                <button aria-label="Close" />
+              </div>
+            </header>
+            <div ref={terminalRef} className="terminal" />
           </section>
         )}
       </main>
 
-      <footer className="statusbar">
-        {status}
-        {error && <span className="error">{error}</span>}
+      <footer className="taskbar">
+        <button className="start-button" aria-label="Start">
+          <span />
+        </button>
+        <button className={active === 'files' ? 'taskbar-app is-active' : 'taskbar-app'} onClick={() => setActive('files')}>
+          <span className="task-icon folder-icon" />
+          <span>File Explorer</span>
+        </button>
+        <button className={active === 'terminal' ? 'taskbar-app is-active' : 'taskbar-app'} onClick={() => setActive('terminal')}>
+          <span className="task-icon terminal-icon" />
+          <span>Terminal</span>
+        </button>
+        <div className="taskbar-spacer" />
+        <span className={connected ? 'network is-online' : 'network'} />
+        <time>{clock}</time>
       </footer>
     </div>
   );

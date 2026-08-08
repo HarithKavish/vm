@@ -42,10 +42,11 @@ type responseError struct {
 
 type connectPayload struct {
 	Profile struct {
-		Host           string `json:"host"`
-		Port           int    `json:"port"`
-		Username       string `json:"username"`
-		PrivateKeyPath string `json:"privateKeyPath"`
+		Host              string `json:"host"`
+		Port              int    `json:"port"`
+		Username          string `json:"username"`
+		PrivateKeyPath    string `json:"privateKeyPath"`
+		PrivateKeyContent string `json:"privateKeyContent"`
 	} `json:"profile"`
 	UserConsent bool `json:"userConsent"`
 }
@@ -167,13 +168,17 @@ func (c *companion) connect(payload connectPayload) error {
 		return fmt.Errorf("%w: host and username are required", errAuth)
 	}
 
-	keyPath := expandHome(payload.Profile.PrivateKeyPath)
-	if keyPath == "" {
-		keyPath = expandHome("~/.ssh/id_ed25519")
-	}
-	privateKey, err := os.ReadFile(keyPath)
-	if err != nil {
-		return fmt.Errorf("%w: key read failed: %v", errAuth, err)
+	privateKey := []byte(payload.Profile.PrivateKeyContent)
+	if len(privateKey) == 0 {
+		keyPath := expandHome(payload.Profile.PrivateKeyPath)
+		if keyPath == "" {
+			keyPath = expandHome("~/.ssh/id_ed25519")
+		}
+		var err error
+		privateKey, err = os.ReadFile(keyPath)
+		if err != nil {
+			return fmt.Errorf("%w: key read failed: %v", errAuth, err)
+		}
 	}
 
 	signer, err := ssh.ParsePrivateKey(privateKey)
