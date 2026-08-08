@@ -452,6 +452,14 @@ button:disabled {
   width: auto;
   height: auto;
   border-radius: 0;
+  /* A maximized window covers the whole viewport, so there's nothing left to blur "through" —
+     but backdrop-filter/box-shadow cost scales with the composited area, and going from a
+     ~980x660 window to the full screen made them expensive enough to visibly lag hover/click
+     handling on the titlebar buttons. Drop to a plain opaque fill instead: same look (nothing
+     shows behind it either way), none of the per-frame compositing cost. */
+  background: rgb(243, 243, 243);
+  backdrop-filter: none;
+  box-shadow: none;
 }
 
 .app-window.is-minimized {
@@ -523,6 +531,10 @@ button:disabled {
 .terminal-window {
   width: min(880px, calc(100% - 40px));
   background: rgba(12, 12, 16, 0.88);
+}
+
+.terminal-window.is-maximized {
+  background: rgb(12, 12, 16);
 }
 
 .settings-window {
