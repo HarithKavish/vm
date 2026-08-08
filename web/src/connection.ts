@@ -27,11 +27,11 @@ export type ConnectionErrorCode =
   | 'UNKNOWN';
 
 export class VMConnectionError extends Error {
-  constructor(
-    message: string,
-    public readonly code: ConnectionErrorCode,
-  ) {
+  readonly code: ConnectionErrorCode;
+
+  constructor(message: string, code: ConnectionErrorCode) {
     super(message);
+    this.code = code;
   }
 }
 
