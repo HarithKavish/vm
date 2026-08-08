@@ -10,6 +10,7 @@ import {
   type FileEntry,
   VMConnectionError,
 } from './connection';
+import { getStoredHandle, setStoredHandle } from './handles';
 
 type AppId = 'files' | 'terminal' | 'settings';
 type WindowState = {
@@ -40,10 +41,11 @@ const defaultWindows: Record<AppId, WindowState> = {
   settings: { closed: true, minimized: false, maximized: false, x: 210, y: 60 },
 };
 
-const ICON_GRID_X = 108;
-const ICON_GRID_Y = 104;
-const ICON_ORIGIN_X = 18;
-const ICON_ORIGIN_Y = 18;
+// Matches the 96px background-size of the .desktop-surface grid pattern so icons visually snap to it.
+const ICON_GRID_X = 96;
+const ICON_GRID_Y = 96;
+const ICON_ORIGIN_X = 0;
+const ICON_ORIGIN_Y = 0;
 
 const defaultIconPositions: Record<AppId, IconPosition> = {
   files: { x: ICON_ORIGIN_X, y: ICON_ORIGIN_Y },
@@ -110,14 +112,52 @@ const formatTime = () =>
     minute: '2-digit',
   }).format(new Date());
 
+type PermissionState = 'granted' | 'denied' | 'prompt';
+type FileHandleLike = {
+  name: string;
+  getFile(): Promise<File>;
+  queryPermission?(opts: { mode: string }): Promise<PermissionState>;
+  requestPermission?(opts: { mode: string }): Promise<PermissionState>;
+};
 type DirectoryHandleLike = {
+  name: string;
   values(): AsyncIterable<{ kind: string; name: string; getFile?: () => Promise<File> }>;
+  queryPermission?(opts: { mode: string }): Promise<PermissionState>;
+  requestPermission?(opts: { mode: string }): Promise<PermissionState>;
 };
 
 const pickLocalDirectory = (): Promise<DirectoryHandleLike> | null => {
   const picker = (window as unknown as { showDirectoryPicker?: () => Promise<DirectoryHandleLike> })
     .showDirectoryPicker;
   return picker ? picker() : null;
+};
+
+const pickPrivateKeyFile = (): Promise<FileHandleLike[]> | null => {
+  const picker = (
+    window as unknown as {
+      showOpenFilePicker?: (opts?: unknown) => Promise<FileHandleLike[]>;
+    }
+  ).showOpenFilePicker;
+  return picker ? picker({ multiple: false }) : null;
+};
+
+const supportsFilePicker = typeof (window as unknown as { showOpenFilePicker?: unknown }).showOpenFilePicker === 'function';
+
+const listImagesFromDirectory = async (
+  dirHandle: DirectoryHandleLike,
+): Promise<{ name: string; url: string }[]> => {
+  const images: { name: string; url: string }[] = [];
+  for await (const entry of dirHandle.values()) {
+    if (entry.kind !== 'file' || !entry.getFile) {
+      continue;
+    }
+    const file = await entry.getFile();
+    if (!file.type.startsWith('image/')) {
+      continue;
+    }
+    images.push({ name: file.name, url: URL.createObjectURL(file) });
+  }
+  return images;
 };
 
 const readFileAsDataUrl = (file: File): Promise<string> =>
@@ -245,6 +285,10 @@ function App() {
   const [wallpaperFolder, setWallpaperFolder] = useState('');
   const [wallpaperImages, setWallpaperImages] = useState<{ name: string; url: string }[]>([]);
   const [wallpaperStatus, setWallpaperStatus] = useState('');
+  const [savedWallpaperFolderName, setSavedWallpaperFolderName] = useState('');
+  const [savedKeyName, setSavedKeyName] = useState('');
+  const [history, setHistory] = useState<string[]>(['/']);
+  const [historyIndex, setHistoryIndex] = useState(0);
   const connection = useMemo(() => new ExtensionVMConnection(), []);
   const startMenuRef = useRef<HTMLDivElement | null>(null);
 
@@ -293,6 +337,41 @@ function App() {
     return () => window.removeEventListener('pointerdown', onPointerDown);
   }, [startOpen]);
 
+  useEffect(() => {
+    void (async () => {
+      const handle = await getStoredHandle<FileHandleLike>('sshKeyHandle');
+      if (!handle) {
+        return;
+      }
+      setSavedKeyName(handle.name);
+      const perm = (await handle.queryPermission?.({ mode: 'read' })) ?? 'prompt';
+      if (perm === 'granted') {
+        const file = await handle.getFile();
+        const content = await file.text();
+        setProfile((current) => ({
+          ...current,
+          privateKeyContent: content,
+          privateKeyName: file.name,
+          privateKeyPath: '',
+        }));
+        setStatus(`${file.name} selected`);
+      }
+    })();
+
+    void (async () => {
+      const handle = await getStoredHandle<DirectoryHandleLike>('wallpaperFolderHandle');
+      if (!handle) {
+        return;
+      }
+      setSavedWallpaperFolderName(handle.name);
+      const perm = (await handle.queryPermission?.({ mode: 'read' })) ?? 'prompt';
+      if (perm === 'granted') {
+        setWallpaperFolder(handle.name);
+        setWallpaperImages(await listImagesFromDirectory(handle));
+      }
+    })();
+  }, []);
+
   const execute = async (command: string): Promise<string> => {
     try {
       return await connection.executeCommand(command);
@@ -326,6 +405,15 @@ function App() {
         minimized: true,
       },
     }));
+  };
+
+  const toggleApp = (id: AppId) => {
+    const w = windows[id];
+    if (!w.closed && !w.minimized && active === id) {
+      minimizeWindow(id);
+    } else {
+      openWindow(id);
+    }
   };
 
   const maximizeWindow = (id: AppId) => {
@@ -413,7 +501,10 @@ function App() {
       }
       setIconPositions((current) => ({
         ...current,
-        [id]: { x: Math.max(4, startPos.x + dx), y: Math.max(4, startPos.y + dy) },
+        [id]: {
+          x: snapToGrid(startPos.x + dx, ICON_GRID_X, ICON_ORIGIN_X),
+          y: snapToGrid(startPos.y + dy, ICON_GRID_Y, ICON_ORIGIN_Y),
+        },
       }));
     };
 
@@ -423,13 +514,6 @@ function App() {
       target.classList.remove('is-dragging');
       if (dragged) {
         target.releasePointerCapture(pointerId);
-        setIconPositions((current) => ({
-          ...current,
-          [id]: {
-            x: snapToGrid(current[id].x, ICON_GRID_X, ICON_ORIGIN_X),
-            y: snapToGrid(current[id].y, ICON_GRID_Y, ICON_ORIGIN_Y),
-          },
-        }));
         // Suppress the click that follows pointerup after a real drag.
         target.dataset.suppressClick = '1';
       }
@@ -447,7 +531,7 @@ function App() {
     openWindow(id);
   };
 
-  const loadDirectory = async (nextPath = path) => {
+  const navigateTo = async (nextPath: string, opts?: { fromHistory?: boolean }) => {
     if (!connected) {
       return;
     }
@@ -456,11 +540,35 @@ function App() {
       setEntries(list);
       setPath(nextPath);
       setAddressInput(nextPath);
+      if (!opts?.fromHistory) {
+        setHistory((current) => [...current.slice(0, historyIndex + 1), nextPath]);
+        setHistoryIndex((current) => current + 1);
+      }
     } catch (e) {
       const err = e as VMConnectionError;
       setError(`${err.code}: ${err.message}`);
     }
   };
+
+  const goBack = () => {
+    if (historyIndex === 0) {
+      return;
+    }
+    const nextIndex = historyIndex - 1;
+    setHistoryIndex(nextIndex);
+    void navigateTo(history[nextIndex], { fromHistory: true });
+  };
+
+  const goForward = () => {
+    if (historyIndex >= history.length - 1) {
+      return;
+    }
+    const nextIndex = historyIndex + 1;
+    setHistoryIndex(nextIndex);
+    void navigateTo(history[nextIndex], { fromHistory: true });
+  };
+
+  const refreshDirectory = () => void navigateTo(path, { fromHistory: true });
 
   const handleKeyFile = async (file?: File) => {
     if (!file) {
@@ -476,6 +584,39 @@ function App() {
     }));
     setStatus(`${file.name} selected`);
     setError('');
+  };
+
+  const chooseKeyFile = async () => {
+    const pending = pickPrivateKeyFile();
+    if (!pending) {
+      return;
+    }
+    try {
+      const [handle] = await pending;
+      if (!handle) {
+        return;
+      }
+      const file = await handle.getFile();
+      await handleKeyFile(file);
+      setSavedKeyName(handle.name);
+      await setStoredHandle('sshKeyHandle', handle);
+    } catch {
+      // Picker cancelled.
+    }
+  };
+
+  const applySavedKey = async () => {
+    const handle = await getStoredHandle<FileHandleLike>('sshKeyHandle');
+    if (!handle) {
+      return;
+    }
+    const perm = (await handle.requestPermission?.({ mode: 'read' })) ?? 'denied';
+    if (perm !== 'granted') {
+      setStatus('Permission to reuse the saved key was denied.');
+      return;
+    }
+    const file = await handle.getFile();
+    await handleKeyFile(file);
   };
 
   const connect = async () => {
@@ -500,6 +641,8 @@ function App() {
       setEntries(list);
       setPath('/');
       setAddressInput('/');
+      setHistory(['/']);
+      setHistoryIndex(0);
       setConnected(true);
       setActive('files');
       setProfile(nextProfile);
@@ -540,7 +683,7 @@ function App() {
     if (!entry.isDirectory) {
       return;
     }
-    void loadDirectory(entry.path);
+    void navigateTo(entry.path);
   };
 
   const chooseWallpaperFolder = async () => {
@@ -552,23 +695,32 @@ function App() {
     }
     try {
       const dirHandle = await pending;
-      const images: { name: string; url: string }[] = [];
-      for await (const entry of dirHandle.values()) {
-        if (entry.kind !== 'file' || !entry.getFile) {
-          continue;
-        }
-        const file = await entry.getFile();
-        if (!file.type.startsWith('image/')) {
-          continue;
-        }
-        images.push({ name: file.name, url: URL.createObjectURL(file) });
-      }
+      const images = await listImagesFromDirectory(dirHandle);
       setWallpaperImages(images);
-      setWallpaperFolder('Selected folder');
+      setWallpaperFolder(dirHandle.name);
+      setSavedWallpaperFolderName(dirHandle.name);
       setWallpaperStatus(images.length ? `${images.length} image(s) found.` : 'No images found in this folder.');
+      await setStoredHandle('wallpaperFolderHandle', dirHandle);
     } catch {
       setWallpaperStatus('Folder selection was cancelled or failed.');
     }
+  };
+
+  const applySavedWallpaperFolder = async () => {
+    const handle = await getStoredHandle<DirectoryHandleLike>('wallpaperFolderHandle');
+    if (!handle) {
+      return;
+    }
+    const perm = (await handle.requestPermission?.({ mode: 'read' })) ?? 'denied';
+    if (perm !== 'granted') {
+      setWallpaperStatus('Permission to reuse the saved folder was denied.');
+      return;
+    }
+    setWallpaperStatus('');
+    const images = await listImagesFromDirectory(handle);
+    setWallpaperImages(images);
+    setWallpaperFolder(handle.name);
+    setWallpaperStatus(images.length ? `${images.length} image(s) found.` : 'No images found in this folder.');
   };
 
   const applyWallpaper = async (image: { name: string; url: string }) => {
@@ -635,15 +787,27 @@ function App() {
               />
             </label>
 
-            <label className="key-picker">
-              <input
-                type="file"
-                accept=".key,.pem,.txt"
-                onChange={(e) => void handleKeyFile(e.target.files?.[0])}
-              />
-              <span className="key-icon" />
-              <strong>{profile.privateKeyName ?? 'Choose VM key'}</strong>
-            </label>
+            {supportsFilePicker ? (
+              <button type="button" className="key-picker" onClick={() => void chooseKeyFile()}>
+                <span className="key-icon" />
+                <strong>{profile.privateKeyName ?? 'Choose VM key'}</strong>
+              </button>
+            ) : (
+              <label className="key-picker">
+                <input
+                  type="file"
+                  accept=".key,.pem,.txt"
+                  onChange={(e) => void handleKeyFile(e.target.files?.[0])}
+                />
+                <span className="key-icon" />
+                <strong>{profile.privateKeyName ?? 'Choose VM key'}</strong>
+              </label>
+            )}
+            {savedKeyName && !profile.privateKeyContent && (
+              <button type="button" className="use-saved-link" onClick={() => void applySavedKey()}>
+                Use saved key: {savedKeyName}
+              </button>
+            )}
 
             <button className="connect-button" onClick={connect} disabled={!canConnect}>
               Connect
@@ -667,7 +831,23 @@ function App() {
               </div>
             </header>
             <div className="explorer-toolbar">
-              <button onClick={() => void loadDirectory('/')} disabled={!connected}>
+              <button
+                className="nav-arrow"
+                aria-label="Back"
+                onClick={goBack}
+                disabled={!connected || historyIndex === 0}
+              >
+                ‹
+              </button>
+              <button
+                className="nav-arrow"
+                aria-label="Forward"
+                onClick={goForward}
+                disabled={!connected || historyIndex >= history.length - 1}
+              >
+                ›
+              </button>
+              <button onClick={() => void navigateTo('/')} disabled={!connected}>
                 Home
               </button>
               <input
@@ -675,19 +855,19 @@ function App() {
                 onChange={(e) => setAddressInput(e.target.value)}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter') {
-                    void loadDirectory(addressInput);
+                    void navigateTo(addressInput);
                   }
                 }}
               />
-              <button onClick={() => void loadDirectory(addressInput)} disabled={!connected}>
-                Go
+              <button aria-label="Refresh" onClick={refreshDirectory} disabled={!connected}>
+                ↻
               </button>
             </div>
             <div className="explorer-body">
               <aside>
-                <button onClick={() => void loadDirectory('/')} disabled={!connected}>Root</button>
-                <button onClick={() => void loadDirectory('/home')} disabled={!connected}>Home</button>
-                <button onClick={() => void loadDirectory('/var/log')} disabled={!connected}>Logs</button>
+                <button onClick={() => void navigateTo('/')} disabled={!connected}>Root</button>
+                <button onClick={() => void navigateTo('/home')} disabled={!connected}>Home</button>
+                <button onClick={() => void navigateTo('/var/log')} disabled={!connected}>Logs</button>
               </aside>
               <ul className="file-list">
                 {entries.map((entry) => (
@@ -695,7 +875,6 @@ function App() {
                     key={entry.path}
                     className={entry.isDirectory ? 'is-directory' : ''}
                     onClick={() => openFilePath(entry)}
-                    onDoubleClick={() => openFilePath(entry)}
                   >
                     <span className={entry.isDirectory ? 'file-icon is-folder' : 'file-icon'} />
                     <span>{entry.name}</span>
@@ -758,6 +937,11 @@ function App() {
                   </button>
                 )}
               </div>
+              {savedWallpaperFolderName && !wallpaperImages.length && (
+                <button type="button" className="use-saved-link" onClick={() => void applySavedWallpaperFolder()}>
+                  Use saved folder: {savedWallpaperFolderName}
+                </button>
+              )}
               {wallpaperStatus && <p className="settings-status">{wallpaperStatus}</p>}
               {wallpaperImages.length > 0 && (
                 <div className="wallpaper-grid">
@@ -789,8 +973,8 @@ function App() {
         {APPS.filter((app) => app.id !== 'settings').map((app) => (
           <button
             key={app.id}
-            className={active === app.id && !windows[app.id].minimized ? 'taskbar-app is-active' : 'taskbar-app'}
-            onClick={() => openWindow(app.id)}
+            className={active === app.id && !windows[app.id].minimized && !windows[app.id].closed ? 'taskbar-app is-active' : 'taskbar-app'}
+            onClick={() => toggleApp(app.id)}
             disabled={app.requiresConnection && !connected}
           >
             <span className={`task-icon ${app.iconClass}`} />
@@ -816,7 +1000,10 @@ function App() {
               {APPS.map((app) => (
                 <button
                   key={app.id}
-                  onClick={() => openWindow(app.id)}
+                  onClick={() => {
+                    toggleApp(app.id);
+                    setStartOpen(false);
+                  }}
                   disabled={app.requiresConnection && !connected}
                 >
                   <span className={`shortcut-icon ${app.iconClass}`} />

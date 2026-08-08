@@ -298,6 +298,18 @@ button:disabled {
   font-size: 0.86rem;
 }
 
+.use-saved-link {
+  display: block;
+  border: 0;
+  background: transparent;
+  color: #0078d4;
+  font-size: 0.82rem;
+  font-weight: 600;
+  text-decoration: underline;
+  padding: 0;
+  margin: 0 0 14px;
+}
+
 .app-window {
   position: absolute;
   width: min(980px, calc(100vw - 166px));
@@ -418,11 +430,19 @@ button:disabled {
   min-height: 50px;
   border-bottom: 1px solid #d8e0e7;
   display: grid;
-  grid-template-columns: auto 1fr auto;
+  grid-template-columns: auto auto auto 1fr auto;
   gap: 8px;
   align-items: center;
   padding: 8px;
   background: #ffffff;
+}
+
+.nav-arrow {
+  min-width: 34px;
+  min-height: 34px;
+  padding: 0;
+  font-size: 1.1rem;
+  line-height: 1;
 }
 
 .explorer-body {
@@ -513,10 +533,16 @@ button:disabled {
   background: #0c1016;
 }
 
-.settings-body {
-  flex: 1;
+.settings-window {
   min-height: 0;
-  overflow: auto;
+}
+
+.settings-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 20px 24px;
 }
 
