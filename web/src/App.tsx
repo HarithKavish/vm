@@ -17,14 +17,18 @@ import { getStoredHandle, setStoredHandle } from './handles';
 
 type AppId = 'files' | 'terminal' | 'settings';
 type Screen = 'lock' | 'login' | 'desktop';
+type SnapZone = 'left' | 'right' | 'top';
 type WindowState = {
   closed: boolean;
   minimized: boolean;
   maximized: boolean;
+  snapped: SnapZone | null;
   x: number;
   y: number;
 };
 type IconPosition = { x: number; y: number };
+
+const SNAP_EDGE_THRESHOLD = 24;
 
 type AppDescriptor = {
   id: AppId;
@@ -40,9 +44,9 @@ const APPS: AppDescriptor[] = [
 ];
 
 const defaultWindows: Record<AppId, WindowState> = {
-  files: { closed: false, minimized: false, maximized: false, x: 132, y: 34 },
-  terminal: { closed: true, minimized: false, maximized: false, x: 176, y: 78 },
-  settings: { closed: true, minimized: false, maximized: false, x: 210, y: 60 },
+  files: { closed: false, minimized: false, maximized: false, snapped: null, x: 132, y: 34 },
+  terminal: { closed: true, minimized: false, maximized: false, snapped: null, x: 176, y: 78 },
+  settings: { closed: true, minimized: false, maximized: false, snapped: null, x: 210, y: 60 },
 };
 
 const ICON_GRID_X = 96;
@@ -178,10 +182,13 @@ const readFileAsDataUrl = (file: File): Promise<string> =>
     reader.readAsDataURL(file);
   });
 
+type CommandResult = { ok: boolean; text: string };
+
+const shellQuote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
+
 const useTerminal = (
-  onCommand: (command: string) => Promise<string>,
+  onCommand: (command: string) => Promise<CommandResult>,
   connected: boolean,
-  error: string,
 ) => {
   // A plain useRef + a [] effect misses the container: the div only mounts once the
   // Terminal window's section renders (gated by `connected`), which is false on the very
@@ -227,7 +234,8 @@ const useTerminal = (
     fitRef.current = fitAddon;
 
     let input = '';
-    const prompt = () => terminal.write('\r\nubuntu@vm:~$ ');
+    const cwdRef: { current: string | null } = { current: null };
+    const prompt = () => terminal.write(`\r\nubuntu@vm:${cwdRef.current ?? '~'}$ `);
 
     terminal.write('VM Desktop Terminal');
     prompt();
@@ -237,19 +245,43 @@ const useTerminal = (
         return;
       }
       if (data === '\r') {
-        const command = input.trim();
+        const raw = input.trim();
         terminal.write('\r\n');
         input = '';
-        if (!command) {
+        if (!raw) {
           prompt();
           return;
         }
-        const output = await commandRef.current(command);
-        terminal.write(output || '(no output)');
+
+        const cdMatch = raw.match(/^cd(?:\s+(.*))?$/);
+        if (cdMatch) {
+          const target = (cdMatch[1] ?? '').trim() || '~';
+          const cdCmd = cwdRef.current
+            ? `cd ${shellQuote(cwdRef.current)} 2>/dev/null; cd ${shellQuote(target)} 2>&1 && pwd`
+            : `cd ${shellQuote(target)} 2>&1 && pwd`;
+          const result = await commandRef.current(cdCmd);
+          if (result.ok) {
+            cwdRef.current = result.text.trim().split('\n').pop() || cwdRef.current;
+          } else {
+            terminal.write(`\x1b[31m${result.text}\x1b[0m`);
+          }
+          prompt();
+          return;
+        }
+
+        const wrapped = cwdRef.current
+          ? `cd ${shellQuote(cwdRef.current)} 2>/dev/null; ${raw}`
+          : raw;
+        const result = await commandRef.current(wrapped);
+        if (result.ok) {
+          terminal.write(result.text || '(no output)');
+        } else {
+          terminal.write(`\x1b[31m${result.text}\x1b[0m`);
+        }
         prompt();
         return;
       }
-      if (data === '') {
+      if (data === '\x7f') {
         if (input.length > 0) {
           input = input.slice(0, -1);
           terminal.write('\b \b');
@@ -270,13 +302,6 @@ const useTerminal = (
       fitRef.current = null;
     };
   }, [node]);
-
-  useEffect(() => {
-    if (!terminalRef.current || !error) {
-      return;
-    }
-    terminalRef.current.writeln(`\r\n[error] ${error}`);
-  }, [error]);
 
   return setNode;
 };
@@ -304,10 +329,15 @@ function App() {
   const [wallpaperStatus, setWallpaperStatus] = useState('');
   const [savedWallpaperFolderName, setSavedWallpaperFolderName] = useState('');
   const [savedKeyName, setSavedKeyName] = useState('');
+  const [keyLookupDone, setKeyLookupDone] = useState(false);
+  const [autoConnecting, setAutoConnecting] = useState(false);
+  const autoConnectTriedRef = useRef(false);
   const [history, setHistory] = useState<string[]>(['/']);
   const [historyIndex, setHistoryIndex] = useState(0);
   const connection = useMemo(() => new ExtensionVMConnection(), []);
   const startMenuRef = useRef<HTMLDivElement | null>(null);
+  const desktopRef = useRef<HTMLDivElement | null>(null);
+  const [snapPreview, setSnapPreview] = useState<SnapZone | null>(null);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -375,6 +405,7 @@ function App() {
     void (async () => {
       const handle = await getStoredHandle<FileHandleLike>('sshKeyHandle');
       if (!handle) {
+        setKeyLookupDone(true);
         return;
       }
       setSavedKeyName(handle.name);
@@ -390,6 +421,7 @@ function App() {
         }));
         setStatus(`${file.name} selected`);
       }
+      setKeyLookupDone(true);
     })();
 
     void (async () => {
@@ -406,17 +438,19 @@ function App() {
     })();
   }, []);
 
-  const execute = async (command: string): Promise<string> => {
+  const execute = async (command: string): Promise<CommandResult> => {
     try {
-      return await connection.executeCommand(command);
+      const text = await connection.executeCommand(command);
+      return { ok: true, text };
     } catch (e) {
       const err = e as VMConnectionError;
-      setError(`${err.code}: ${err.message}`);
-      return '';
+      const text = `${err.code}: ${err.message}`;
+      setError(text);
+      return { ok: false, text };
     }
   };
 
-  const terminalNodeRef = useTerminal(execute, connected, error);
+  const terminalNodeRef = useTerminal(execute, connected);
 
   const openWindow = (id: AppId) => {
     setActive(id);
@@ -458,6 +492,7 @@ function App() {
         ...current[id],
         maximized: !current[id].maximized,
         minimized: false,
+        snapped: null,
       },
     }));
   };
@@ -481,11 +516,23 @@ function App() {
 
     const startX = event.clientX;
     const startY = event.clientY;
-    const startWindow = windows[id];
+    const wasSnapped = windows[id].snapped;
+    // Popping a snapped window back to free-floating starts it roughly under the cursor,
+    // matching how Windows 11 un-snaps a window the moment you start dragging it away.
+    const startWindow = wasSnapped ? { x: startX - 60, y: Math.max(8, startY - 8) } : windows[id];
     const pointerId = event.pointerId;
     const titlebar = event.currentTarget;
     titlebar.setPointerCapture(pointerId);
     setActive(id);
+
+    if (wasSnapped) {
+      setWindows((current) => ({
+        ...current,
+        [id]: { ...current[id], snapped: null, x: startWindow.x, y: startWindow.y },
+      }));
+    }
+
+    let zone: SnapZone | null = null;
 
     const moveWindow = (moveEvent: PointerEvent) => {
       const nextX = Math.max(8, startWindow.x + moveEvent.clientX - startX);
@@ -498,12 +545,42 @@ function App() {
           y: nextY,
         },
       }));
+
+      const bounds = desktopRef.current?.getBoundingClientRect();
+      let nextZone: SnapZone | null = null;
+      if (bounds) {
+        const px = moveEvent.clientX - bounds.left;
+        const py = moveEvent.clientY - bounds.top;
+        if (py <= SNAP_EDGE_THRESHOLD) {
+          nextZone = 'top';
+        } else if (px <= SNAP_EDGE_THRESHOLD) {
+          nextZone = 'left';
+        } else if (px >= bounds.width - SNAP_EDGE_THRESHOLD) {
+          nextZone = 'right';
+        }
+      }
+      if (nextZone !== zone) {
+        zone = nextZone;
+        setSnapPreview(nextZone);
+      }
     };
 
     const stopDrag = () => {
       titlebar.releasePointerCapture(pointerId);
       window.removeEventListener('pointermove', moveWindow);
       window.removeEventListener('pointerup', stopDrag);
+      setSnapPreview(null);
+      if (zone === 'top') {
+        setWindows((current) => ({
+          ...current,
+          [id]: { ...current[id], maximized: true, snapped: null },
+        }));
+      } else if (zone) {
+        setWindows((current) => ({
+          ...current,
+          [id]: { ...current[id], snapped: zone, maximized: false },
+        }));
+      }
     };
 
     window.addEventListener('pointermove', moveWindow);
@@ -706,6 +783,23 @@ function App() {
     }
   };
 
+  useEffect(() => {
+    if (
+      screen !== 'desktop' ||
+      connected ||
+      autoConnectTriedRef.current ||
+      !keyLookupDone
+    ) {
+      return;
+    }
+    autoConnectTriedRef.current = true;
+    if (!profile.privateKeyContent || !parseTarget(target)) {
+      return;
+    }
+    setAutoConnecting(true);
+    void connect().finally(() => setAutoConnecting(false));
+  }, [screen, connected, keyLookupDone, profile.privateKeyContent, target]);
+
   const disconnect = async () => {
     await connection.disconnect();
     setConnected(false);
@@ -779,9 +873,14 @@ function App() {
       windows[id].maximized ? 'is-maximized' : '',
       windows[id].minimized ? 'is-minimized' : '',
       windows[id].closed ? 'is-closed' : '',
+      windows[id].snapped === 'left' ? 'is-snapped-left' : '',
+      windows[id].snapped === 'right' ? 'is-snapped-right' : '',
     ]
       .filter(Boolean)
       .join(' ');
+
+  const windowInlineStyle = (id: AppId) =>
+    windows[id].maximized || windows[id].snapped ? undefined : { left: windows[id].x, top: windows[id].y };
 
   const backgroundStyle = wallpaper
     ? { backgroundImage: `url(${wallpaper})`, backgroundSize: 'cover', backgroundPosition: 'center' }
@@ -825,7 +924,8 @@ function App() {
 
   return (
     <div className="os-shell" style={backgroundStyle}>
-      <main className="desktop-surface">
+      <main className="desktop-surface" ref={desktopRef}>
+        {snapPreview && <div className={`snap-preview is-${snapPreview}`} />}
         {APPS.map((app) => (
           <button
             key={app.id}
@@ -840,7 +940,14 @@ function App() {
           </button>
         ))}
 
-        {!connected && (
+        {!connected && (!keyLookupDone || autoConnecting) && (
+          <div className="auto-connect-status">
+            <span className="auto-connect-spinner" />
+            <span>{autoConnecting ? `Connecting to ${profile.name || 'your VM'}…` : 'Loading…'}</span>
+          </div>
+        )}
+
+        {!connected && keyLookupDone && !autoConnecting && (
           <section className="connect-panel" aria-label="VM connection">
             <div className="connect-header">
               <div>
@@ -891,7 +998,7 @@ function App() {
         {connected && !windows.files.closed && (
           <section
             className={windowClassName('files', 'explorer-window')}
-            style={windows.files.maximized ? undefined : { left: windows.files.x, top: windows.files.y }}
+            style={windowInlineStyle('files')}
             onPointerDown={() => setActive('files')}
           >
             <header className="window-titlebar" onPointerDown={(event) => beginDrag('files', event)}>
@@ -987,7 +1094,7 @@ function App() {
         {connected && (
           <section
             className={windowClassName('terminal', 'terminal-window')}
-            style={windows.terminal.maximized ? undefined : { left: windows.terminal.x, top: windows.terminal.y }}
+            style={windowInlineStyle('terminal')}
             onPointerDown={() => setActive('terminal')}
           >
             <header className="window-titlebar is-dark" onPointerDown={(event) => beginDrag('terminal', event)}>
@@ -1008,7 +1115,7 @@ function App() {
         {!windows.settings.closed && (
           <section
             className={windowClassName('settings', 'settings-window')}
-            style={windows.settings.maximized ? undefined : { left: windows.settings.x, top: windows.settings.y }}
+            style={windowInlineStyle('settings')}
             onPointerDown={() => setActive('settings')}
           >
             <header className="window-titlebar" onPointerDown={(event) => beginDrag('settings', event)}>

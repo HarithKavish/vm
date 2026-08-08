@@ -384,6 +384,33 @@ button:disabled {
   font-size: 0.86rem;
 }
 
+.auto-connect-status {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  color: #fff;
+  text-shadow: 0 1px 6px rgba(0, 0, 0, 0.4);
+  font-size: 0.92rem;
+}
+
+.auto-connect-spinner {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  border: 3px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
+
 .use-saved-link {
   display: block;
   border: 0;
@@ -439,6 +466,58 @@ button:disabled {
   opacity: 0;
   pointer-events: none;
   transition: none;
+}
+
+/* ---------- Window snapping (Windows 11 style) ---------- */
+
+.app-window.is-snapped-left,
+.app-window.is-snapped-right {
+  top: 8px;
+  bottom: 8px;
+  width: calc(50% - 12px);
+  height: auto;
+  border-radius: var(--win-radius);
+}
+
+.app-window.is-snapped-left {
+  left: 8px;
+}
+
+.app-window.is-snapped-right {
+  left: calc(50% + 4px);
+}
+
+.snap-preview {
+  position: absolute;
+  top: 8px;
+  bottom: 8px;
+  border-radius: var(--win-radius);
+  background: rgba(255, 255, 255, 0.22);
+  border: 2px solid rgba(255, 255, 255, 0.7);
+  z-index: 30;
+  pointer-events: none;
+  animation: snap-preview-in 0.1s ease-out;
+}
+
+@keyframes snap-preview-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.snap-preview.is-left {
+  left: 8px;
+  width: calc(50% - 12px);
+}
+
+.snap-preview.is-right {
+  left: calc(50% + 4px);
+  width: calc(50% - 12px);
+}
+
+.snap-preview.is-top {
+  left: 8px;
+  right: 8px;
+  width: auto;
 }
 
 .terminal-window {
@@ -766,6 +845,7 @@ button:disabled {
   min-height: 0;
   display: grid;
   grid-template-columns: 220px 1fr;
+  grid-template-rows: minmax(0, 1fr);
   background: rgba(251, 251, 251, 0.7);
 }
 
@@ -840,9 +920,8 @@ button:disabled {
 }
 
 .settings-body {
-  flex: 1 1 auto;
   min-height: 0;
-  height: 0;
+  min-width: 0;
   overflow-y: auto;
   overflow-x: hidden;
   padding: 24px 28px;
