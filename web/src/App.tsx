@@ -337,6 +337,7 @@ function App() {
   const connection = useMemo(() => new ExtensionVMConnection(), []);
   const startMenuRef = useRef<HTMLDivElement | null>(null);
   const desktopRef = useRef<HTMLDivElement | null>(null);
+  const windowElRefs = useRef<Partial<Record<AppId, HTMLElement>>>({});
   const [snapPreview, setSnapPreview] = useState<SnapZone | null>(null);
 
   useEffect(() => {
@@ -378,6 +379,53 @@ function App() {
   useEffect(() => {
     window.localStorage.setItem(ICON_POSITIONS_KEY, JSON.stringify(iconPositions));
   }, [iconPositions]);
+
+  // Window default positions are fixed pixel offsets (a cascade look), but the window's own
+  // width/height are CSS percentages of .desktop-surface. On a narrower viewport (a smaller
+  // browser window, a laptop screen, etc.) that combination can push a window's right/bottom
+  // edge — and with it the maximize/close buttons — past the visible area, where .os-shell's
+  // overflow:hidden clips them into being unclickable. Re-clamp every open window's position to
+  // stay fully inside .desktop-surface whenever a window opens or the viewport resizes.
+  const clampWindowsToViewport = () => {
+    const bounds = desktopRef.current?.getBoundingClientRect();
+    if (!bounds) {
+      return;
+    }
+    setWindows((current) => {
+      let changed = false;
+      const next = { ...current };
+      (Object.keys(current) as AppId[]).forEach((id) => {
+        const w = current[id];
+        if (w.closed || w.maximized || w.snapped) {
+          return;
+        }
+        const el = windowElRefs.current[id];
+        const rect = el?.getBoundingClientRect();
+        if (!rect || rect.width <= 0 || rect.height <= 0) {
+          return;
+        }
+        const maxX = Math.max(8, bounds.width - rect.width - 8);
+        const maxY = Math.max(8, bounds.height - rect.height - 8);
+        const clampedX = Math.min(Math.max(8, w.x), maxX);
+        const clampedY = Math.min(Math.max(8, w.y), maxY);
+        if (clampedX !== w.x || clampedY !== w.y) {
+          changed = true;
+          next[id] = { ...w, x: clampedX, y: clampedY };
+        }
+      });
+      return changed ? next : current;
+    });
+  };
+
+  useEffect(() => {
+    const raf = requestAnimationFrame(clampWindowsToViewport);
+    return () => cancelAnimationFrame(raf);
+  }, [windows.files.closed, windows.terminal.closed, windows.settings.closed, screen, connected]);
+
+  useEffect(() => {
+    window.addEventListener('resize', clampWindowsToViewport);
+    return () => window.removeEventListener('resize', clampWindowsToViewport);
+  }, []);
 
   useEffect(() => {
     if (wallpaper) {
@@ -997,6 +1045,7 @@ function App() {
 
         {connected && !windows.files.closed && (
           <section
+            ref={(el) => { windowElRefs.current.files = el ?? undefined; }}
             className={windowClassName('files', 'explorer-window')}
             style={windowInlineStyle('files')}
             onPointerDown={() => setActive('files')}
@@ -1093,6 +1142,7 @@ function App() {
 
         {connected && (
           <section
+            ref={(el) => { windowElRefs.current.terminal = el ?? undefined; }}
             className={windowClassName('terminal', 'terminal-window')}
             style={windowInlineStyle('terminal')}
             onPointerDown={() => setActive('terminal')}
@@ -1114,6 +1164,7 @@ function App() {
 
         {!windows.settings.closed && (
           <section
+            ref={(el) => { windowElRefs.current.settings = el ?? undefined; }}
             className={windowClassName('settings', 'settings-window')}
             style={windowInlineStyle('settings')}
             onPointerDown={() => setActive('settings')}
