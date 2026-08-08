@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
@@ -11,6 +11,30 @@ import {
 } from './connection';
 
 type WindowId = 'terminal' | 'files';
+type WindowState = {
+  closed: boolean;
+  minimized: boolean;
+  maximized: boolean;
+  x: number;
+  y: number;
+};
+
+const defaultWindows: Record<WindowId, WindowState> = {
+  files: {
+    closed: false,
+    minimized: false,
+    maximized: false,
+    x: 132,
+    y: 34,
+  },
+  terminal: {
+    closed: true,
+    minimized: false,
+    maximized: false,
+    x: 176,
+    y: 78,
+  },
+};
 
 const defaultProfile: ConnectionProfile = {
   id: 'local',
@@ -131,6 +155,7 @@ function App() {
   const [status, setStatus] = useState('Choose a key');
   const [error, setError] = useState('');
   const [active, setActive] = useState<WindowId>('files');
+  const [windows, setWindows] = useState(defaultWindows);
   const [path, setPath] = useState('/');
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [clock, setClock] = useState(formatTime);
@@ -152,6 +177,88 @@ function App() {
   };
 
   const terminalRef = useTerminal(execute, connected, error);
+
+  const openWindow = (id: WindowId) => {
+    setActive(id);
+    setWindows((current) => ({
+      ...current,
+      [id]: {
+        ...current[id],
+        closed: false,
+        minimized: false,
+      },
+    }));
+  };
+
+  const minimizeWindow = (id: WindowId) => {
+    setWindows((current) => ({
+      ...current,
+      [id]: {
+        ...current[id],
+        minimized: true,
+      },
+    }));
+  };
+
+  const maximizeWindow = (id: WindowId) => {
+    setActive(id);
+    setWindows((current) => ({
+      ...current,
+      [id]: {
+        ...current[id],
+        maximized: !current[id].maximized,
+        minimized: false,
+      },
+    }));
+  };
+
+  const closeWindow = (id: WindowId) => {
+    setWindows((current) => ({
+      ...current,
+      [id]: {
+        ...current[id],
+        closed: true,
+        minimized: false,
+        maximized: false,
+      },
+    }));
+  };
+
+  const beginDrag = (id: WindowId, event: ReactPointerEvent<HTMLElement>) => {
+    if (windows[id].maximized || event.button !== 0) {
+      return;
+    }
+
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startWindow = windows[id];
+    const pointerId = event.pointerId;
+    const titlebar = event.currentTarget;
+    titlebar.setPointerCapture(pointerId);
+    setActive(id);
+
+    const moveWindow = (moveEvent: PointerEvent) => {
+      const nextX = Math.max(8, startWindow.x + moveEvent.clientX - startX);
+      const nextY = Math.max(8, startWindow.y + moveEvent.clientY - startY);
+      setWindows((current) => ({
+        ...current,
+        [id]: {
+          ...current[id],
+          x: nextX,
+          y: nextY,
+        },
+      }));
+    };
+
+    const stopDrag = () => {
+      titlebar.releasePointerCapture(pointerId);
+      window.removeEventListener('pointermove', moveWindow);
+      window.removeEventListener('pointerup', stopDrag);
+    };
+
+    window.addEventListener('pointermove', moveWindow);
+    window.addEventListener('pointerup', stopDrag);
+  };
 
   const loadDirectory = async (nextPath = path) => {
     if (!connected) {
@@ -193,6 +300,14 @@ function App() {
       setPath('/');
       setConnected(true);
       setActive('files');
+      setWindows((current) => ({
+        ...current,
+        files: {
+          ...current.files,
+          closed: false,
+          minimized: false,
+        },
+      }));
       setStatus(`Connected to ${profile.host}`);
     } catch (e) {
       const err = e as VMConnectionError;
@@ -229,11 +344,11 @@ function App() {
   return (
     <div className="os-shell">
       <main className="desktop-surface">
-        <button className="desktop-shortcut" onClick={() => setActive('files')}>
+        <button className="desktop-shortcut" onClick={() => openWindow('files')} disabled={!connected}>
           <span className="shortcut-icon folder-icon" />
           <span>File Explorer</span>
         </button>
-        <button className="desktop-shortcut terminal-shortcut" onClick={() => setActive('terminal')}>
+        <button className="desktop-shortcut terminal-shortcut" onClick={() => openWindow('terminal')} disabled={!connected}>
           <span className="shortcut-icon terminal-icon" />
           <span>Terminal</span>
         </button>
@@ -307,14 +422,22 @@ function App() {
           </section>
         )}
 
-        {active === 'files' && (
-          <section className="app-window explorer-window">
-            <header className="window-titlebar">
+        {connected && !windows.files.closed && !windows.files.minimized && (
+          <section
+            className={[
+              'app-window explorer-window',
+              active === 'files' ? 'is-focused' : '',
+              windows.files.maximized ? 'is-maximized' : '',
+            ].join(' ')}
+            style={windows.files.maximized ? undefined : { left: windows.files.x, top: windows.files.y }}
+            onPointerDown={() => setActive('files')}
+          >
+            <header className="window-titlebar" onPointerDown={(event) => beginDrag('files', event)}>
               <span>File Explorer</span>
               <div className="window-controls">
-                <button aria-label="Minimize" />
-                <button aria-label="Maximize" />
-                <button aria-label="Close" />
+                <button aria-label="Minimize" onPointerDown={(event) => event.stopPropagation()} onClick={() => minimizeWindow('files')} />
+                <button aria-label="Maximize" onPointerDown={(event) => event.stopPropagation()} onClick={() => maximizeWindow('files')} />
+                <button aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeWindow('files')} />
               </div>
             </header>
             <div className="explorer-toolbar">
@@ -352,14 +475,22 @@ function App() {
           </section>
         )}
 
-        {active === 'terminal' && (
-          <section className="app-window terminal-window">
-            <header className="window-titlebar">
+        {connected && !windows.terminal.closed && !windows.terminal.minimized && (
+          <section
+            className={[
+              'app-window terminal-window',
+              active === 'terminal' ? 'is-focused' : '',
+              windows.terminal.maximized ? 'is-maximized' : '',
+            ].join(' ')}
+            style={windows.terminal.maximized ? undefined : { left: windows.terminal.x, top: windows.terminal.y }}
+            onPointerDown={() => setActive('terminal')}
+          >
+            <header className="window-titlebar" onPointerDown={(event) => beginDrag('terminal', event)}>
               <span>Terminal</span>
               <div className="window-controls">
-                <button aria-label="Minimize" />
-                <button aria-label="Maximize" />
-                <button aria-label="Close" />
+                <button aria-label="Minimize" onPointerDown={(event) => event.stopPropagation()} onClick={() => minimizeWindow('terminal')} />
+                <button aria-label="Maximize" onPointerDown={(event) => event.stopPropagation()} onClick={() => maximizeWindow('terminal')} />
+                <button aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeWindow('terminal')} />
               </div>
             </header>
             <div ref={terminalRef} className="terminal" />
@@ -371,11 +502,19 @@ function App() {
         <button className="start-button" aria-label="Start">
           <span />
         </button>
-        <button className={active === 'files' ? 'taskbar-app is-active' : 'taskbar-app'} onClick={() => setActive('files')}>
+        <button
+          className={active === 'files' && !windows.files.minimized ? 'taskbar-app is-active' : 'taskbar-app'}
+          onClick={() => openWindow('files')}
+          disabled={!connected}
+        >
           <span className="task-icon folder-icon" />
           <span>File Explorer</span>
         </button>
-        <button className={active === 'terminal' ? 'taskbar-app is-active' : 'taskbar-app'} onClick={() => setActive('terminal')}>
+        <button
+          className={active === 'terminal' && !windows.terminal.minimized ? 'taskbar-app is-active' : 'taskbar-app'}
+          onClick={() => openWindow('terminal')}
+          disabled={!connected}
+        >
           <span className="task-icon terminal-icon" />
           <span>Terminal</span>
         </button>

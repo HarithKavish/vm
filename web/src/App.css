@@ -80,6 +80,11 @@ button:disabled {
   outline: none;
 }
 
+.desktop-shortcut:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+
 .terminal-shortcut {
   position: absolute;
   top: 112px;
@@ -309,8 +314,6 @@ button:disabled {
 
 .app-window {
   position: absolute;
-  left: 132px;
-  top: 34px;
   width: min(980px, calc(100vw - 166px));
   height: min(680px, calc(100vh - 112px));
   border-radius: 5px;
@@ -319,6 +322,21 @@ button:disabled {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  z-index: 5;
+}
+
+.app-window.is-focused {
+  z-index: 8;
+  border-color: rgba(255, 255, 255, 0.68);
+  box-shadow: 0 28px 90px rgba(0, 0, 0, 0.42);
+}
+
+.app-window.is-maximized {
+  left: 8px;
+  top: 8px;
+  width: calc(100vw - 16px);
+  height: calc(100vh - 64px);
+  border-radius: 0;
 }
 
 .terminal-window {
@@ -334,6 +352,13 @@ button:disabled {
   justify-content: space-between;
   padding-left: 12px;
   font-size: 0.86rem;
+  cursor: grab;
+  user-select: none;
+  touch-action: none;
+}
+
+.window-titlebar:active {
+  cursor: grabbing;
 }
 
 .window-controls {
@@ -350,6 +375,16 @@ button:disabled {
 
 .window-controls button:hover {
   background: #e8eef4;
+}
+
+.window-controls button:nth-child(3):hover {
+  background: #c42b1c;
+}
+
+.window-controls button:nth-child(3):hover::before {
+  background:
+    linear-gradient(45deg, transparent 46%, #fff 46% 54%, transparent 54%),
+    linear-gradient(-45deg, transparent 46%, #fff 46% 54%, transparent 54%);
 }
 
 .window-controls button:nth-child(1)::before,
@@ -526,6 +561,11 @@ button:disabled {
   background: rgba(255, 255, 255, 0.15);
 }
 
+.taskbar-app:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
 .task-icon {
   width: 24px;
   height: 20px;
@@ -594,6 +634,13 @@ button:disabled {
 
   .app-window {
     height: calc(100vh - 76px);
+  }
+
+  .app-window.is-maximized {
+    left: 0;
+    top: 0;
+    width: 100vw;
+    height: calc(100vh - 56px);
   }
 
   .explorer-toolbar {
