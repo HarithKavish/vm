@@ -19,7 +19,14 @@ import { getStoredHandle, setStoredHandle } from './handles';
 type AppId = 'files' | 'terminal' | 'settings' | 'notepad';
 type Screen = 'lock' | 'login' | 'desktop';
 type SnapZone = 'left' | 'right' | 'top';
-type WindowState = {
+// A single open (or closed-but-persistent) window. Most apps here only ever have one
+// instance - files/terminal/settings keep a single fixed-id instance for their whole
+// lifetime (created once, toggled open/closed) so stateful children like xterm.js never
+// get unmounted. Notepad is the exception: each open file gets its own instance, created
+// and fully removed on close, so multiple files can be open at once.
+type WindowInstance = {
+  id: string;
+  appId: AppId;
   closed: boolean;
   minimized: boolean;
   maximized: boolean;
@@ -27,6 +34,17 @@ type WindowState = {
   x: number;
   y: number;
   zIndex: number;
+};
+// Notepad's editable content lives outside WindowInstance, keyed separately by instance id,
+// so typing in one Notepad window doesn't churn the `windows` array that position-clamping
+// and z-order effects watch - those only care about window chrome, not keystrokes.
+type NotepadState = {
+  path: string | null;
+  content: string;
+  savedContent: string;
+  loading: boolean;
+  saving: boolean;
+  error: string;
 };
 type IconPosition = { x: number; y: number };
 
@@ -46,12 +64,13 @@ const APPS: AppDescriptor[] = [
   { id: 'settings', name: 'Settings', icon: settingsIcon, requiresConnection: false },
 ];
 
-const defaultWindows: Record<AppId, WindowState> = {
-  files: { closed: false, minimized: false, maximized: false, snapped: null, x: 132, y: 34, zIndex: 0 },
-  terminal: { closed: true, minimized: false, maximized: false, snapped: null, x: 176, y: 78, zIndex: 0 },
-  notepad: { closed: true, minimized: false, maximized: false, snapped: null, x: 250, y: 90, zIndex: 0 },
-  settings: { closed: true, minimized: false, maximized: false, snapped: null, x: 210, y: 60, zIndex: 0 },
-};
+// files/terminal/settings each get exactly one persistent instance, present from the start
+// (just closed) - notepad has none initially, since instances are created on demand per file.
+const initialWindows: WindowInstance[] = [
+  { id: 'files', appId: 'files', closed: false, minimized: false, maximized: false, snapped: null, x: 132, y: 34, zIndex: 0 },
+  { id: 'terminal', appId: 'terminal', closed: true, minimized: false, maximized: false, snapped: null, x: 176, y: 78, zIndex: 0 },
+  { id: 'settings', appId: 'settings', closed: true, minimized: false, maximized: false, snapped: null, x: 210, y: 60, zIndex: 0 },
+];
 
 const ICON_GRID_X = 96;
 const ICON_GRID_Y = 96;
@@ -483,19 +502,18 @@ function App() {
   const [status, setStatus] = useState('Choose a key');
   const [error, setError] = useState('');
   const [explorerError, setExplorerError] = useState('');
-  const [notepadPath, setNotepadPath] = useState<string | null>(null);
-  const [notepadContent, setNotepadContent] = useState('');
-  const [notepadSavedContent, setNotepadSavedContent] = useState('');
-  const [notepadLoading, setNotepadLoading] = useState(false);
-  const [notepadSaving, setNotepadSaving] = useState(false);
-  const [notepadError, setNotepadError] = useState('');
-  const [active, setActive] = useState<AppId>('files');
-  const [windows, setWindows] = useState(defaultWindows);
+  const [notepadState, setNotepadState] = useState<Record<string, NotepadState>>({});
+  const [activeId, setActiveId] = useState<string>('files');
+  const [windows, setWindows] = useState<WindowInstance[]>(initialWindows);
   const zCounterRef = useRef(1);
-  // Apps mid-exit-animation on the taskbar: closeWindow marks the window closed immediately
+  const notepadCounterRef = useRef(0);
+  // Apps mid-exit-animation on the taskbar: closeInstance marks the window closed immediately
   // (business state), but keeps the icon mounted here a bit longer so it can play the
-  // shrink/fade-out animation instead of vanishing instantly.
+  // shrink/fade-out animation instead of vanishing instantly. Tracked per-app (not per
+  // instance): the icon only animates out when the LAST open instance of that app closes.
   const [closingApps, setClosingApps] = useState<AppId[]>([]);
+  const [previewApp, setPreviewApp] = useState<AppId | null>(null);
+  const previewTimeoutRef = useRef<number | null>(null);
   const [path, setPath] = useState('/');
   const [addressInput, setAddressInput] = useState('/');
   const [entries, setEntries] = useState<FileEntry[]>([]);
@@ -518,7 +536,7 @@ function App() {
   const connection = useMemo(() => new ExtensionVMConnection(), []);
   const startMenuRef = useRef<HTMLDivElement | null>(null);
   const desktopRef = useRef<HTMLDivElement | null>(null);
-  const windowElRefs = useRef<Partial<Record<AppId, HTMLElement>>>({});
+  const windowElRefs = useRef<Partial<Record<string, HTMLElement>>>({});
   const [snapPreview, setSnapPreview] = useState<SnapZone | null>(null);
 
   useEffect(() => {
@@ -574,16 +592,14 @@ function App() {
     }
     setWindows((current) => {
       let changed = false;
-      const next = { ...current };
-      (Object.keys(current) as AppId[]).forEach((id) => {
-        const w = current[id];
+      const next = current.map((w) => {
         if (w.closed || w.maximized || w.snapped) {
-          return;
+          return w;
         }
-        const el = windowElRefs.current[id];
+        const el = windowElRefs.current[w.id];
         const rect = el?.getBoundingClientRect();
         if (!rect || rect.width <= 0 || rect.height <= 0) {
-          return;
+          return w;
         }
         const maxX = Math.max(8, bounds.width - rect.width - 8);
         const maxY = Math.max(8, bounds.height - rect.height - 8);
@@ -591,17 +607,23 @@ function App() {
         const clampedY = Math.min(Math.max(8, w.y), maxY);
         if (clampedX !== w.x || clampedY !== w.y) {
           changed = true;
-          next[id] = { ...w, x: clampedX, y: clampedY };
+          return { ...w, x: clampedX, y: clampedY };
         }
+        return w;
       });
       return changed ? next : current;
     });
   };
 
+  // A string, not the array itself, so dragging (which updates x/y every pointermove) and
+  // notepad typing (which lives outside `windows` entirely) don't retrigger this - only an
+  // actual open/close transition, or a window appearing/disappearing, should.
+  const openClosedSignature = windows.map((w) => `${w.id}:${w.closed ? 1 : 0}`).join(',');
+
   useEffect(() => {
     const raf = requestAnimationFrame(clampWindowsToViewport);
     return () => cancelAnimationFrame(raf);
-  }, [windows.files.closed, windows.terminal.closed, windows.settings.closed, screen, connected]);
+  }, [openClosedSignature, screen, connected]);
 
   useEffect(() => {
     window.addEventListener('resize', clampWindowsToViewport);
@@ -681,115 +703,148 @@ function App() {
 
   const terminalNodeRef = useTerminal(execute, connected);
 
+  const instancesFor = (appId: AppId) => windows.filter((w) => w.appId === appId);
+  const openInstancesFor = (appId: AppId) => instancesFor(appId).filter((w) => !w.closed);
+  const topmostInstance = (instances: WindowInstance[]) =>
+    instances.reduce<WindowInstance | null>((best, w) => (!best || w.zIndex > best.zIndex ? w : best), null);
+
   // Bumps a window's z-index above every other window and marks it active - the single
   // path all "bring this window forward" interactions (open, click, drag, maximize) go
   // through, so the topmost window and the active one never drift apart.
-  const bringToFront = (id: AppId, patch?: Partial<WindowState> | ((w: WindowState) => Partial<WindowState>)) => {
+  const bringToFront = (
+    instanceId: string,
+    patch?: Partial<WindowInstance> | ((w: WindowInstance) => Partial<WindowInstance>),
+  ) => {
     zCounterRef.current += 1;
     const z = zCounterRef.current;
-    setActive(id);
-    setWindows((current) => ({
-      ...current,
-      [id]: { ...current[id], ...(typeof patch === 'function' ? patch(current[id]) : patch), zIndex: z },
-    }));
+    setActiveId(instanceId);
+    setWindows((current) =>
+      current.map((w) =>
+        w.id === instanceId
+          ? { ...w, ...(typeof patch === 'function' ? patch(w) : patch), zIndex: z }
+          : w,
+      ),
+    );
   };
 
   // When the active window is hidden (minimized/closed), focus whichever remaining
-  // visible window is now topmost - otherwise `active` keeps pointing at a hidden
+  // visible window is now topmost - otherwise `activeId` keeps pointing at a hidden
   // window and nothing on screen reads as focused.
-  const focusTopmostVisible = (excludeId: AppId) => {
-    let nextId: AppId | null = null;
-    let bestZ = -Infinity;
-    for (const app of APPS) {
-      if (app.id === excludeId) {
-        continue;
-      }
-      const w = windows[app.id];
-      if (w.closed || w.minimized || w.zIndex <= bestZ) {
-        continue;
-      }
-      bestZ = w.zIndex;
-      nextId = app.id;
-    }
-    if (nextId) {
-      setActive(nextId);
+  const focusTopmostVisible = (excludeId: string) => {
+    const next = topmostInstance(windows.filter((w) => w.id !== excludeId && !w.closed && !w.minimized));
+    if (next) {
+      setActiveId(next.id);
     }
   };
 
-  const openWindow = (id: AppId) => {
+  // Opens (or focuses, if one's already open) the given app's window. For files/terminal/
+  // settings that's the single persistent instance; for notepad with nothing open yet, it's
+  // a fresh blank "Untitled" window (opening a *specific* file goes through openInNotepad
+  // instead, which reuses an already-open instance for that path or creates a new one).
+  const openOrFocusApp = (appId: AppId) => {
     setStartOpen(false);
-    bringToFront(id, { closed: false, minimized: false });
+    const open = openInstancesFor(appId);
+    if (open.length > 0) {
+      const top = topmostInstance(open);
+      if (top) {
+        bringToFront(top.id, { minimized: false });
+      }
+      return;
+    }
+    if (appId === 'notepad') {
+      createNotepadInstance(null);
+      return;
+    }
+    bringToFront(appId, { closed: false, minimized: false });
   };
 
-  const minimizeWindow = (id: AppId) => {
-    setWindows((current) => ({
-      ...current,
-      [id]: {
-        ...current[id],
-        minimized: true,
-      },
-    }));
-    if (active === id) {
-      focusTopmostVisible(id);
+  const minimizeWindow = (instanceId: string) => {
+    setWindows((current) => current.map((w) => (w.id === instanceId ? { ...w, minimized: true } : w)));
+    if (activeId === instanceId) {
+      focusTopmostVisible(instanceId);
     }
   };
 
-  const toggleApp = (id: AppId) => {
-    const w = windows[id];
-    if (!w.closed && !w.minimized && active === id) {
-      minimizeWindow(id);
+  // Taskbar/Start-menu click on an app (not a specific window): toggle the topmost open
+  // instance the same way a single-window app always has, or open one if none are open.
+  const toggleApp = (appId: AppId) => {
+    const open = openInstancesFor(appId);
+    if (open.length === 0) {
+      openOrFocusApp(appId);
+      return;
+    }
+    const top = topmostInstance(open);
+    if (!top) {
+      return;
+    }
+    if (activeId === top.id && !top.minimized) {
+      minimizeWindow(top.id);
     } else {
-      openWindow(id);
+      bringToFront(top.id, { minimized: false });
     }
   };
 
-  const maximizeWindow = (id: AppId) => {
-    bringToFront(id, (w) => ({ maximized: !w.maximized, minimized: false, snapped: null }));
+  const maximizeWindow = (instanceId: string) => {
+    bringToFront(instanceId, (w) => ({ maximized: !w.maximized, minimized: false, snapped: null }));
   };
 
   const TASKBAR_EXIT_MS = 160;
 
-  const closeWindow = (id: AppId) => {
-    setClosingApps((current) => (current.includes(id) ? current : [...current, id]));
-    window.setTimeout(() => {
-      setClosingApps((current) => current.filter((appId) => appId !== id));
-    }, TASKBAR_EXIT_MS);
+  // files/terminal/settings keep their single instance around (just closed:true) so
+  // stateful children like xterm.js never get unmounted; notepad instances are fully
+  // removed, since a plain controlled <textarea> has nothing worth preserving once closed.
+  const closeInstance = (instanceId: string) => {
+    const instance = windows.find((w) => w.id === instanceId);
+    if (!instance) {
+      return;
+    }
+    const appId = instance.appId;
+    const remainingOpen = openInstancesFor(appId).filter((w) => w.id !== instanceId).length;
+    if (remainingOpen === 0) {
+      setClosingApps((current) => (current.includes(appId) ? current : [...current, appId]));
+      window.setTimeout(() => {
+        setClosingApps((current) => current.filter((a) => a !== appId));
+      }, TASKBAR_EXIT_MS);
+    }
 
-    setWindows((current) => ({
-      ...current,
-      [id]: {
-        ...current[id],
-        closed: true,
-        minimized: false,
-        maximized: false,
-      },
-    }));
-    if (active === id) {
-      focusTopmostVisible(id);
+    if (appId === 'notepad') {
+      setWindows((current) => current.filter((w) => w.id !== instanceId));
+      setNotepadState((current) => {
+        const next = { ...current };
+        delete next[instanceId];
+        return next;
+      });
+    } else {
+      setWindows((current) =>
+        current.map((w) => (w.id === instanceId ? { ...w, closed: true, minimized: false, maximized: false } : w)),
+      );
+    }
+    if (activeId === instanceId) {
+      focusTopmostVisible(instanceId);
     }
   };
 
-  const beginDrag = (id: AppId, event: ReactPointerEvent<HTMLElement>) => {
-    if (windows[id].maximized || event.button !== 0) {
+  const beginDrag = (instanceId: string, event: ReactPointerEvent<HTMLElement>) => {
+    const instance = windows.find((w) => w.id === instanceId);
+    if (!instance || instance.maximized || event.button !== 0) {
       return;
     }
 
     const startX = event.clientX;
     const startY = event.clientY;
-    const wasSnapped = windows[id].snapped;
+    const wasSnapped = instance.snapped;
     // Popping a snapped window back to free-floating starts it roughly under the cursor,
     // matching how Windows 11 un-snaps a window the moment you start dragging it away.
-    const startWindow = wasSnapped ? { x: startX - 60, y: Math.max(8, startY - 8) } : windows[id];
+    const startWindow = wasSnapped ? { x: startX - 60, y: Math.max(8, startY - 8) } : instance;
     const pointerId = event.pointerId;
     const titlebar = event.currentTarget;
     titlebar.setPointerCapture(pointerId);
-    bringToFront(id);
+    bringToFront(instanceId);
 
     if (wasSnapped) {
-      setWindows((current) => ({
-        ...current,
-        [id]: { ...current[id], snapped: null, x: startWindow.x, y: startWindow.y },
-      }));
+      setWindows((current) =>
+        current.map((w) => (w.id === instanceId ? { ...w, snapped: null, x: startWindow.x, y: startWindow.y } : w)),
+      );
     }
 
     let zone: SnapZone | null = null;
@@ -797,14 +852,9 @@ function App() {
     const moveWindow = (moveEvent: PointerEvent) => {
       const nextX = Math.max(8, startWindow.x + moveEvent.clientX - startX);
       const nextY = Math.max(8, startWindow.y + moveEvent.clientY - startY);
-      setWindows((current) => ({
-        ...current,
-        [id]: {
-          ...current[id],
-          x: nextX,
-          y: nextY,
-        },
-      }));
+      setWindows((current) =>
+        current.map((w) => (w.id === instanceId ? { ...w, x: nextX, y: nextY } : w)),
+      );
 
       const bounds = desktopRef.current?.getBoundingClientRect();
       let nextZone: SnapZone | null = null;
@@ -831,15 +881,13 @@ function App() {
       window.removeEventListener('pointerup', stopDrag);
       setSnapPreview(null);
       if (zone === 'top') {
-        setWindows((current) => ({
-          ...current,
-          [id]: { ...current[id], maximized: true, snapped: null },
-        }));
+        setWindows((current) =>
+          current.map((w) => (w.id === instanceId ? { ...w, maximized: true, snapped: null } : w)),
+        );
       } else if (zone) {
-        setWindows((current) => ({
-          ...current,
-          [id]: { ...current[id], snapped: zone, maximized: false },
-        }));
+        setWindows((current) =>
+          current.map((w) => (w.id === instanceId ? { ...w, snapped: zone, maximized: false } : w)),
+        );
       }
     };
 
@@ -899,7 +947,7 @@ function App() {
       delete event.currentTarget.dataset.suppressClick;
       return;
     }
-    openWindow(id);
+    openOrFocusApp(id);
   };
 
   const navigateTo = async (nextPath: string, opts?: { fromHistory?: boolean }) => {
@@ -1017,17 +1065,12 @@ function App() {
       setHistory(['/']);
       setHistoryIndex(0);
       setConnected(true);
-      setActive('files');
+      setActiveId('files');
       setProfile(nextProfile);
       window.localStorage.setItem(LAST_TARGET_KEY, target.trim());
-      setWindows((current) => ({
-        ...current,
-        files: {
-          ...current.files,
-          closed: false,
-          minimized: false,
-        },
-      }));
+      setWindows((current) =>
+        current.map((w) => (w.id === 'files' ? { ...w, closed: false, minimized: false } : w)),
+      );
       setStatus('Connected');
     } catch (e) {
       const err = e as VMConnectionError;
@@ -1067,53 +1110,89 @@ function App() {
     setConnected(false);
     setStatus('Disconnected');
     setEntries([]);
-    setNotepadPath(null);
-    setNotepadContent('');
-    setNotepadSavedContent('');
-    setNotepadError('');
+    setWindows((current) => current.filter((w) => w.appId !== 'notepad'));
+    setNotepadState({});
   };
 
-  const notepadDirty = notepadContent !== notepadSavedContent;
+  const notepadDirty = (instanceId: string) => {
+    const state = notepadState[instanceId];
+    return !!state && state.content !== state.savedContent;
+  };
 
-  const openInNotepad = async (entry: FileEntry) => {
-    if (notepadDirty && notepadPath && notepadPath !== entry.path) {
-      const fileName = notepadPath.split('/').pop() || notepadPath;
-      if (!window.confirm(`Discard unsaved changes to ${fileName}?`)) {
-        return;
-      }
-    }
-    bringToFront('notepad', { closed: false, minimized: false });
-    setNotepadPath(entry.path);
-    setNotepadContent('');
-    setNotepadSavedContent('');
-    setNotepadError('');
-    setNotepadLoading(true);
+  const patchNotepadState = (instanceId: string, patch: Partial<NotepadState>) => {
+    setNotepadState((current) =>
+      current[instanceId] ? { ...current, [instanceId]: { ...current[instanceId], ...patch } } : current,
+    );
+  };
+
+  const loadNotepadContent = async (instanceId: string, filePath: string) => {
     try {
-      const content = await connection.readFile(entry.path);
-      setNotepadContent(content);
-      setNotepadSavedContent(content);
+      const content = await connection.readFile(filePath);
+      patchNotepadState(instanceId, { content, savedContent: content, loading: false });
     } catch (e) {
       const err = e as VMConnectionError;
-      setNotepadError(`${err.code}: ${err.message}`);
-    } finally {
-      setNotepadLoading(false);
+      patchNotepadState(instanceId, { loading: false, error: `${err.code}: ${err.message}` });
     }
   };
 
-  const saveNotepad = async () => {
-    if (!notepadPath || notepadSaving) {
+  // Always creates a brand-new window - callers are responsible for checking whether the
+  // file is already open first (openInNotepad does; the taskbar/Start-menu "just launch
+  // Notepad" path doesn't need to, since a blank Untitled window is never a duplicate).
+  const createNotepadInstance = (entry: FileEntry | null) => {
+    notepadCounterRef.current += 1;
+    zCounterRef.current += 1;
+    const id = `notepad-${notepadCounterRef.current}`;
+    // Cascade each new window slightly down-right of the last, like Windows does, so
+    // opening several files doesn't stack every window in an identical spot.
+    const offset = (notepadCounterRef.current % 6) * 24;
+    const instance: WindowInstance = {
+      id,
+      appId: 'notepad',
+      closed: false,
+      minimized: false,
+      maximized: false,
+      snapped: null,
+      x: 250 + offset,
+      y: 90 + offset,
+      zIndex: zCounterRef.current,
+    };
+    setWindows((current) => [...current, instance]);
+    setNotepadState((current) => ({
+      ...current,
+      [id]: { path: entry?.path ?? null, content: '', savedContent: '', loading: !!entry, saving: false, error: '' },
+    }));
+    setActiveId(id);
+    if (entry) {
+      void loadNotepadContent(id, entry.path);
+    }
+    return id;
+  };
+
+  const openInNotepad = (entry: FileEntry) => {
+    const existing = windows.find(
+      (w) => w.appId === 'notepad' && !w.closed && notepadState[w.id]?.path === entry.path,
+    );
+    if (existing) {
+      bringToFront(existing.id, { minimized: false });
       return;
     }
-    setNotepadSaving(true);
-    setNotepadError('');
+    createNotepadInstance(entry);
+  };
+
+  const saveNotepad = async (instanceId: string) => {
+    const state = notepadState[instanceId];
+    if (!state?.path || state.saving) {
+      return;
+    }
+    const path = state.path;
+    const contentToSave = state.content;
+    patchNotepadState(instanceId, { saving: true, error: '' });
     try {
-      await connection.writeFile(notepadPath, notepadContent);
-      setNotepadSavedContent(notepadContent);
+      await connection.writeFile(path, contentToSave);
+      patchNotepadState(instanceId, { saving: false, savedContent: contentToSave });
     } catch (e) {
       const err = e as VMConnectionError;
-      setNotepadError(`${err.code}: ${err.message}`);
-    } finally {
-      setNotepadSaving(false);
+      patchNotepadState(instanceId, { saving: false, error: `${err.code}: ${err.message}` });
     }
   };
 
@@ -1123,7 +1202,7 @@ function App() {
       return;
     }
     if (defaultAppFor(entry.name) === 'notepad') {
-      void openInNotepad(entry);
+      openInNotepad(entry);
     }
   };
 
@@ -1195,24 +1274,49 @@ function App() {
 
   const canConnect = Boolean(parseTarget(target) && profile.privateKeyContent);
 
-  const windowClassName = (id: AppId, extra: string) =>
+  const windowClassName = (instance: WindowInstance, extra: string) =>
     [
       'app-window',
       extra,
-      active === id ? 'is-focused' : '',
-      windows[id].maximized ? 'is-maximized' : '',
-      windows[id].minimized ? 'is-minimized' : '',
-      windows[id].closed ? 'is-closed' : '',
-      windows[id].snapped === 'left' ? 'is-snapped-left' : '',
-      windows[id].snapped === 'right' ? 'is-snapped-right' : '',
+      activeId === instance.id ? 'is-focused' : '',
+      instance.maximized ? 'is-maximized' : '',
+      instance.minimized ? 'is-minimized' : '',
+      instance.closed ? 'is-closed' : '',
+      instance.snapped === 'left' ? 'is-snapped-left' : '',
+      instance.snapped === 'right' ? 'is-snapped-right' : '',
     ]
       .filter(Boolean)
       .join(' ');
 
-  const windowInlineStyle = (id: AppId): CSSProperties => ({
-    zIndex: windows[id].zIndex,
-    ...(windows[id].maximized || windows[id].snapped ? {} : { left: windows[id].x, top: windows[id].y }),
+  const windowInlineStyle = (instance: WindowInstance): CSSProperties => ({
+    zIndex: instance.zIndex,
+    ...(instance.maximized || instance.snapped ? {} : { left: instance.x, top: instance.y }),
   });
+
+  const instanceTitle = (w: WindowInstance) => {
+    if (w.appId === 'notepad') {
+      const p = notepadState[w.id]?.path;
+      return p ? p.split('/').pop() || p : 'Untitled';
+    }
+    return APPS.find((a) => a.id === w.appId)?.name ?? w.appId;
+  };
+
+  const scheduleShowPreview = (appId: AppId) => {
+    if (previewTimeoutRef.current) {
+      window.clearTimeout(previewTimeoutRef.current);
+    }
+    previewTimeoutRef.current = window.setTimeout(() => setPreviewApp(appId), 350);
+  };
+  const cancelPreviewTimer = () => {
+    if (previewTimeoutRef.current) {
+      window.clearTimeout(previewTimeoutRef.current);
+      previewTimeoutRef.current = null;
+    }
+  };
+  const scheduleHidePreview = () => {
+    cancelPreviewTimer();
+    previewTimeoutRef.current = window.setTimeout(() => setPreviewApp(null), 200);
+  };
 
   const backgroundStyle = wallpaper
     ? { backgroundImage: `url(${wallpaper})`, backgroundSize: 'cover', backgroundPosition: 'center' }
@@ -1253,6 +1357,13 @@ function App() {
       </div>
     );
   }
+
+  // files/terminal/settings always have exactly one instance, present from initialWindows
+  // onward - safe to assume non-null everywhere below.
+  const filesWindow = windows.find((w) => w.id === 'files')!;
+  const terminalWindow = windows.find((w) => w.id === 'terminal')!;
+  const settingsWindow = windows.find((w) => w.id === 'settings')!;
+  const notepadWindows = windows.filter((w) => w.appId === 'notepad');
 
   return (
     <div className="os-shell" style={backgroundStyle}>
@@ -1327,11 +1438,11 @@ function App() {
           </section>
         )}
 
-        {connected && !windows.files.closed && (
+        {connected && !filesWindow.closed && (
           <section
             ref={(el) => { windowElRefs.current.files = el ?? undefined; }}
-            className={windowClassName('files', 'explorer-window')}
-            style={windowInlineStyle('files')}
+            className={windowClassName(filesWindow, 'explorer-window')}
+            style={windowInlineStyle(filesWindow)}
             onPointerDown={() => bringToFront('files')}
           >
             <header className="window-titlebar" onPointerDown={(event) => beginDrag('files', event)}>
@@ -1340,7 +1451,7 @@ function App() {
               <div className="window-controls">
                 <button aria-label="Minimize" onPointerDown={(event) => event.stopPropagation()} onClick={() => minimizeWindow('files')} />
                 <button aria-label="Maximize" onPointerDown={(event) => event.stopPropagation()} onClick={() => maximizeWindow('files')} />
-                <button className="is-close" aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeWindow('files')} />
+                <button className="is-close" aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeInstance('files')} />
               </div>
             </header>
             <div className="explorer-command-bar">
@@ -1437,8 +1548,8 @@ function App() {
         {connected && (
           <section
             ref={(el) => { windowElRefs.current.terminal = el ?? undefined; }}
-            className={windowClassName('terminal', 'terminal-window')}
-            style={windowInlineStyle('terminal')}
+            className={windowClassName(terminalWindow, 'terminal-window')}
+            style={windowInlineStyle(terminalWindow)}
             onPointerDown={() => bringToFront('terminal')}
           >
             <header className="window-titlebar is-dark" onPointerDown={(event) => beginDrag('terminal', event)}>
@@ -1449,74 +1560,86 @@ function App() {
               <div className="window-controls">
                 <button aria-label="Minimize" onPointerDown={(event) => event.stopPropagation()} onClick={() => minimizeWindow('terminal')} />
                 <button aria-label="Maximize" onPointerDown={(event) => event.stopPropagation()} onClick={() => maximizeWindow('terminal')} />
-                <button className="is-close" aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeWindow('terminal')} />
+                <button className="is-close" aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeInstance('terminal')} />
               </div>
             </header>
             <div ref={terminalNodeRef} className="terminal-pane" />
           </section>
         )}
 
-        {connected && !windows.notepad.closed && (
-          <section
-            ref={(el) => { windowElRefs.current.notepad = el ?? undefined; }}
-            className={windowClassName('notepad', 'notepad-window')}
-            style={windowInlineStyle('notepad')}
-            onPointerDown={() => bringToFront('notepad')}
-          >
-            <header className="window-titlebar" onPointerDown={(event) => beginDrag('notepad', event)}>
-              <img src={notepadIcon} alt="" className="titlebar-icon" />
-              <span>
-                {notepadDirty ? '*' : ''}
-                {notepadPath ? notepadPath.split('/').pop() || notepadPath : 'Untitled'} - Notepad
-              </span>
-              <div className="window-controls">
-                <button aria-label="Minimize" onPointerDown={(event) => event.stopPropagation()} onClick={() => minimizeWindow('notepad')} />
-                <button aria-label="Maximize" onPointerDown={(event) => event.stopPropagation()} onClick={() => maximizeWindow('notepad')} />
-                <button
-                  className="is-close"
-                  aria-label="Close"
-                  onPointerDown={(event) => event.stopPropagation()}
-                  onClick={() => {
-                    if (notepadDirty && !window.confirm('Discard unsaved changes?')) {
-                      return;
-                    }
-                    closeWindow('notepad');
-                  }}
-                />
+        {connected && notepadWindows.map((instance) => {
+          const state = notepadState[instance.id] ?? {
+            path: null,
+            content: '',
+            savedContent: '',
+            loading: false,
+            saving: false,
+            error: '',
+          };
+          const dirty = state.content !== state.savedContent;
+          return (
+            <section
+              key={instance.id}
+              ref={(el) => { windowElRefs.current[instance.id] = el ?? undefined; }}
+              className={windowClassName(instance, 'notepad-window')}
+              style={windowInlineStyle(instance)}
+              onPointerDown={() => bringToFront(instance.id)}
+            >
+              <header className="window-titlebar" onPointerDown={(event) => beginDrag(instance.id, event)}>
+                <img src={notepadIcon} alt="" className="titlebar-icon" />
+                <span>
+                  {dirty ? '*' : ''}
+                  {state.path ? state.path.split('/').pop() || state.path : 'Untitled'} - Notepad
+                </span>
+                <div className="window-controls">
+                  <button aria-label="Minimize" onPointerDown={(event) => event.stopPropagation()} onClick={() => minimizeWindow(instance.id)} />
+                  <button aria-label="Maximize" onPointerDown={(event) => event.stopPropagation()} onClick={() => maximizeWindow(instance.id)} />
+                  <button
+                    className="is-close"
+                    aria-label="Close"
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={() => {
+                      if (dirty && !window.confirm('Discard unsaved changes?')) {
+                        return;
+                      }
+                      closeInstance(instance.id);
+                    }}
+                  />
+                </div>
+              </header>
+              <div className="notepad-toolbar">
+                <button onClick={() => void saveNotepad(instance.id)} disabled={!state.path || state.loading || state.saving}>
+                  {state.saving ? 'Saving…' : 'Save'}
+                </button>
+                {state.error && <span className="notepad-error">{state.error}</span>}
               </div>
-            </header>
-            <div className="notepad-toolbar">
-              <button onClick={() => void saveNotepad()} disabled={!notepadPath || notepadLoading || notepadSaving}>
-                {notepadSaving ? 'Saving…' : 'Save'}
-              </button>
-              {notepadError && <span className="notepad-error">{notepadError}</span>}
-            </div>
-            <textarea
-              className="notepad-textarea"
-              value={notepadContent}
-              onChange={(e) => setNotepadContent(e.target.value)}
-              onKeyDown={(e) => {
-                if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
-                  e.preventDefault();
-                  void saveNotepad();
-                }
-              }}
-              placeholder={notepadLoading ? 'Loading…' : 'Open a .txt file from File Explorer to edit it here.'}
-              disabled={notepadLoading}
-              spellCheck={false}
-            />
-            <div className="notepad-status-bar">
-              <span>{notepadPath ?? 'No file open'}</span>
-              <span>{notepadDirty ? 'Unsaved changes' : notepadPath ? 'Saved' : ''}</span>
-            </div>
-          </section>
-        )}
+              <textarea
+                className="notepad-textarea"
+                value={state.content}
+                onChange={(e) => patchNotepadState(instance.id, { content: e.target.value })}
+                onKeyDown={(e) => {
+                  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+                    e.preventDefault();
+                    void saveNotepad(instance.id);
+                  }
+                }}
+                placeholder={state.loading ? 'Loading…' : 'Open a .txt file from File Explorer to edit it here.'}
+                disabled={state.loading}
+                spellCheck={false}
+              />
+              <div className="notepad-status-bar">
+                <span>{state.path ?? 'No file open'}</span>
+                <span>{dirty ? 'Unsaved changes' : state.path ? 'Saved' : ''}</span>
+              </div>
+            </section>
+          );
+        })}
 
-        {!windows.settings.closed && (
+        {!settingsWindow.closed && (
           <section
             ref={(el) => { windowElRefs.current.settings = el ?? undefined; }}
-            className={windowClassName('settings', 'settings-window')}
-            style={windowInlineStyle('settings')}
+            className={windowClassName(settingsWindow, 'settings-window')}
+            style={windowInlineStyle(settingsWindow)}
             onPointerDown={() => bringToFront('settings')}
           >
             <header className="window-titlebar" onPointerDown={(event) => beginDrag('settings', event)}>
@@ -1525,7 +1648,7 @@ function App() {
               <div className="window-controls">
                 <button aria-label="Minimize" onPointerDown={(event) => event.stopPropagation()} onClick={() => minimizeWindow('settings')} />
                 <button aria-label="Maximize" onPointerDown={(event) => event.stopPropagation()} onClick={() => maximizeWindow('settings')} />
-                <button className="is-close" aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeWindow('settings')} />
+                <button className="is-close" aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeInstance('settings')} />
               </div>
             </header>
             <div className="settings-shell">
@@ -1600,25 +1723,70 @@ function App() {
           >
             <img src={startIcon} alt="" className="start-icon" />
           </button>
-          {APPS.filter((app) => !windows[app.id].closed || closingApps.includes(app.id)).map((app) => (
-            <button
-              key={app.id}
-              aria-label={app.name}
-              title={app.name}
-              className={[
-                'taskbar-app',
-                !windows[app.id].closed ? 'is-open' : '',
-                active === app.id && !windows[app.id].minimized ? 'is-active' : '',
-                closingApps.includes(app.id) ? 'is-closing' : '',
-              ]
-                .filter(Boolean)
-                .join(' ')}
-              onClick={() => toggleApp(app.id)}
-              disabled={app.requiresConnection && !connected}
-            >
-              <img src={app.icon} alt="" className="task-icon" />
-            </button>
-          ))}
+          {APPS.filter((app) => openInstancesFor(app.id).length > 0 || closingApps.includes(app.id)).map((app) => {
+            const open = openInstancesFor(app.id);
+            const isActive = open.some((w) => w.id === activeId && !w.minimized);
+            return (
+              <div
+                key={app.id}
+                className="taskbar-app-wrap"
+                onMouseEnter={() => scheduleShowPreview(app.id)}
+                onMouseLeave={scheduleHidePreview}
+              >
+                <button
+                  aria-label={app.name}
+                  title={app.name}
+                  className={[
+                    'taskbar-app',
+                    open.length > 0 ? 'is-open' : '',
+                    isActive ? 'is-active' : '',
+                    closingApps.includes(app.id) ? 'is-closing' : '',
+                  ]
+                    .filter(Boolean)
+                    .join(' ')}
+                  onClick={() => toggleApp(app.id)}
+                  disabled={app.requiresConnection && !connected}
+                >
+                  <img src={app.icon} alt="" className="task-icon" />
+                </button>
+                {previewApp === app.id && open.length > 0 && (
+                  <div
+                    className="taskbar-preview"
+                    onMouseEnter={cancelPreviewTimer}
+                    onMouseLeave={scheduleHidePreview}
+                  >
+                    {open.map((w) => (
+                      <div
+                        key={w.id}
+                        className={w.id === activeId && !w.minimized ? 'taskbar-preview-item is-active' : 'taskbar-preview-item'}
+                      >
+                        <button
+                          className="taskbar-preview-body"
+                          onClick={() => {
+                            bringToFront(w.id, { minimized: false });
+                            setPreviewApp(null);
+                          }}
+                        >
+                          <img src={app.icon} alt="" className="taskbar-preview-icon" />
+                          <span>{instanceTitle(w)}</span>
+                        </button>
+                        <button
+                          className="taskbar-preview-close"
+                          aria-label={`Close ${instanceTitle(w)}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            closeInstance(w.id);
+                          }}
+                        >
+                          ×
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
 
         <div className="taskbar-tray">
