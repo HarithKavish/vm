@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"runtime"
 	"sort"
@@ -298,15 +299,15 @@ func (c *companion) execute(command string) (string, error) {
 	return b.String(), nil
 }
 
-func (c *companion) listDirectory(path string) ([]fileEntry, error) {
+func (c *companion) listDirectory(dirPath string) ([]fileEntry, error) {
 	if c.sftpClient == nil {
 		return nil, fmt.Errorf("%w: not connected", errNetwork)
 	}
-	if path == "" {
-		path = "/"
+	if dirPath == "" {
+		dirPath = "/"
 	}
 
-	entries, err := c.sftpClient.ReadDir(path)
+	entries, err := c.sftpClient.ReadDir(dirPath)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errRemoteCommand, err)
 	}
@@ -322,7 +323,11 @@ func (c *companion) listDirectory(path string) ([]fileEntry, error) {
 	for _, entry := range entries {
 		items = append(items, fileEntry{
 			Name:       entry.Name(),
-			Path:       filepath.Join(path, entry.Name()),
+			// The remote filesystem is always the SSH target (Linux/SFTP), which uses "/"
+			// regardless of what OS this companion binary itself was built for. filepath.Join
+			// would use "\" on Windows builds, producing paths like "\dev" that don't exist on
+			// the remote system — path.Join always uses "/".
+			Path:       path.Join(dirPath, entry.Name()),
 			IsDir:      entry.IsDir(),
 			Size:       entry.Size(),
 			ModifiedAt: entry.ModTime().Format(time.RFC3339),
