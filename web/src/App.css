@@ -867,7 +867,7 @@ button:disabled {
 
 /* ---------- Terminal (Windows Terminal style) ---------- */
 
-.terminal {
+.terminal-pane {
   flex: 1;
   min-height: 0;
   padding: 8px;

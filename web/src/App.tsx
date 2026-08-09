@@ -1363,7 +1363,7 @@ function App() {
                 <button className="is-close" aria-label="Close" onPointerDown={(event) => event.stopPropagation()} onClick={() => closeWindow('terminal')} />
               </div>
             </header>
-            <div ref={terminalNodeRef} className="terminal" />
+            <div ref={terminalNodeRef} className="terminal-pane" />
           </section>
         )}
 
