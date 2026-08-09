@@ -113,6 +113,31 @@ const fileTypeIcon = (fileName: string): string | undefined => {
   return appId ? FILE_TYPE_ICONS[appId] : undefined;
 };
 
+// "Focused view" scopes every directory listing in the app down to just the folders that
+// lead to these paths - adjust this list to change what's in scope, the filter logic below
+// doesn't assume there are exactly two.
+const FOCUSED_VIEW_PATHS = ['/opt/hermes', '/home/ubuntu/workspace'];
+
+// True once the listed directory itself is one of the target paths, or is nested inside one -
+// past that point filtering stops entirely and real contents show all the way down.
+const isWithinFocusedTarget = (dirPath: string) =>
+  FOCUSED_VIEW_PATHS.some((target) => dirPath === target || dirPath.startsWith(`${target}/`));
+
+// Filters a raw directory listing down to only the entries that are themselves a target path,
+// or a directory on the way to one - `showHidden` disables filtering entirely (the "show
+// hidden folders" toggle), and listings already at or under a target are never filtered
+// regardless of `showHidden`, since focused view only ever hides the scaffolding on the way in.
+const filterFocusedView = (dirPath: string, entries: FileEntry[], showHidden: boolean): FileEntry[] => {
+  if (showHidden || isWithinFocusedTarget(dirPath)) {
+    return entries;
+  }
+  return entries.filter(
+    (entry) =>
+      entry.isDirectory &&
+      FOCUSED_VIEW_PATHS.some((target) => target === entry.path || target.startsWith(`${entry.path}/`)),
+  );
+};
+
 const ICON_POSITIONS_KEY = 'vm-desktop-icon-positions';
 const WALLPAPER_KEY = 'vm-desktop-wallpaper';
 const WALLPAPER_NAME_KEY = 'vm-desktop-wallpaper-name';
@@ -553,6 +578,9 @@ function App() {
   const [diskUsageError, setDiskUsageError] = useState('');
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
+  // Default (false) = focused view is active, i.e. hidden folders ARE hidden - matches the
+  // toggle's default label "Show Hidden Folders" (the action available from this state).
+  const [showHiddenFolders, setShowHiddenFolders] = useState(false);
   const [clock, setClock] = useState(formatTime);
   const [startOpen, setStartOpen] = useState(false);
   const [startSearch, setStartSearch] = useState('');
@@ -1522,6 +1550,11 @@ function App() {
     : undefined;
 
   const filteredApps = APPS.filter((app) => app.name.toLowerCase().includes(startSearch.trim().toLowerCase()));
+  const visibleEntries = filterFocusedView(path, entries, showHiddenFolders);
+  const focusedViewShortcuts = FOCUSED_VIEW_PATHS.map((p) => ({
+    path: p,
+    label: (p.split('/').pop() || p).replace(/\b\w/g, (c) => c.toUpperCase()),
+  }));
 
   if (screen === 'lock') {
     return (
@@ -1685,6 +1718,13 @@ function App() {
                   }}
                 />
               </div>
+              <button
+                className="hidden-folders-toggle"
+                onClick={() => setShowHiddenFolders((current) => !current)}
+                disabled={!connected}
+              >
+                {showHiddenFolders ? 'Hide Hidden Folders' : 'Show Hidden Folders'}
+              </button>
             </div>
             {explorerError && <p className="explorer-error">{explorerError}</p>}
             <div className="explorer-body">
@@ -1693,15 +1733,16 @@ function App() {
                 <button className={path === THIS_PC ? 'is-active' : ''} onClick={() => void navigateTo(THIS_PC)} disabled={!connected}>
                   <span className="nav-icon is-thispc" /> This PC
                 </button>
-                <button className={path === '/' ? 'is-active' : ''} onClick={() => void navigateTo('/')} disabled={!connected}>
-                  <span className="nav-icon" /> Root
-                </button>
-                <button className={path === '/home' ? 'is-active' : ''} onClick={() => void navigateTo('/home')} disabled={!connected}>
-                  <span className="nav-icon" /> Home
-                </button>
-                <button className={path === '/var/log' ? 'is-active' : ''} onClick={() => void navigateTo('/var/log')} disabled={!connected}>
-                  <span className="nav-icon" /> Logs
-                </button>
+                {focusedViewShortcuts.map((shortcut) => (
+                  <button
+                    key={shortcut.path}
+                    className={path === shortcut.path ? 'is-active' : ''}
+                    onClick={() => void navigateTo(shortcut.path)}
+                    disabled={!connected}
+                  >
+                    <span className="nav-icon" /> {shortcut.label}
+                  </button>
+                ))}
               </aside>
               <div className="explorer-list-pane">
                 {path === THIS_PC ? (
@@ -1753,7 +1794,7 @@ function App() {
                       <span>Date modified</span>
                     </div>
                     <ul className="file-list">
-                      {entries.map((entry) => (
+                      {visibleEntries.map((entry) => (
                         <li
                           key={entry.path}
                           className={[
@@ -1775,14 +1816,14 @@ function App() {
                           <small>{entry.modifiedAt}</small>
                         </li>
                       ))}
-                      {entries.length === 0 && (
+                      {visibleEntries.length === 0 && (
                         <li className="empty-row">
                           <span>{connected ? 'This folder is empty' : 'Connect to browse files'}</span>
                         </li>
                       )}
                     </ul>
                     <div className="explorer-status-bar">
-                      <span>{entries.length} item{entries.length === 1 ? '' : 's'}</span>
+                      <span>{visibleEntries.length} item{visibleEntries.length === 1 ? '' : 's'}</span>
                     </div>
                   </>
                 )}
