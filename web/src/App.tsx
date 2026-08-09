@@ -317,6 +317,10 @@ function App() {
   const [explorerError, setExplorerError] = useState('');
   const [active, setActive] = useState<AppId>('files');
   const [windows, setWindows] = useState(defaultWindows);
+  // Apps mid-exit-animation on the taskbar: closeWindow marks the window closed immediately
+  // (business state), but keeps the icon mounted here a bit longer so it can play the
+  // shrink/fade-out animation instead of vanishing instantly.
+  const [closingApps, setClosingApps] = useState<AppId[]>([]);
   const [path, setPath] = useState('/');
   const [addressInput, setAddressInput] = useState('/');
   const [entries, setEntries] = useState<FileEntry[]>([]);
@@ -547,7 +551,14 @@ function App() {
     }));
   };
 
+  const TASKBAR_EXIT_MS = 160;
+
   const closeWindow = (id: AppId) => {
+    setClosingApps((current) => (current.includes(id) ? current : [...current, id]));
+    window.setTimeout(() => {
+      setClosingApps((current) => current.filter((appId) => appId !== id));
+    }, TASKBAR_EXIT_MS);
+
     setWindows((current) => ({
       ...current,
       [id]: {
@@ -1275,12 +1286,19 @@ function App() {
           >
             <img src={startIcon} alt="" className="start-icon" />
           </button>
-          {APPS.filter((app) => !windows[app.id].closed).map((app) => (
+          {APPS.filter((app) => !windows[app.id].closed || closingApps.includes(app.id)).map((app) => (
             <button
               key={app.id}
               aria-label={app.name}
               title={app.name}
-              className={active === app.id && !windows[app.id].minimized ? 'taskbar-app is-active' : 'taskbar-app'}
+              className={[
+                'taskbar-app',
+                !windows[app.id].closed ? 'is-open' : '',
+                active === app.id && !windows[app.id].minimized ? 'is-active' : '',
+                closingApps.includes(app.id) ? 'is-closing' : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
               onClick={() => toggleApp(app.id)}
               disabled={app.requiresConnection && !connected}
             >
