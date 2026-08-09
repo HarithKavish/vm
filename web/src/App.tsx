@@ -319,6 +319,7 @@ function App() {
   const [path, setPath] = useState('/');
   const [addressInput, setAddressInput] = useState('/');
   const [entries, setEntries] = useState<FileEntry[]>([]);
+  const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [clock, setClock] = useState(formatTime);
   const [startOpen, setStartOpen] = useState(false);
   const [startSearch, setStartSearch] = useState('');
@@ -697,6 +698,7 @@ function App() {
     try {
       const list = await connection.listDirectory(nextPath);
       setEntries(list);
+      setSelectedPath(null);
       setPath(nextPath);
       setAddressInput(nextPath);
       if (!opts?.fromHistory) {
@@ -1116,8 +1118,12 @@ function App() {
                   {entries.map((entry) => (
                     <li
                       key={entry.path}
-                      className={entry.isDirectory ? 'is-directory' : ''}
-                      onClick={() => openFilePath(entry)}
+                      className={[
+                        entry.isDirectory ? 'is-directory' : '',
+                        selectedPath === entry.path ? 'is-selected' : '',
+                      ].filter(Boolean).join(' ')}
+                      onClick={() => setSelectedPath(entry.path)}
+                      onDoubleClick={() => openFilePath(entry)}
                     >
                       <span className={entry.isDirectory ? 'file-icon is-folder' : 'file-icon'} />
                       <span>{entry.name}</span>

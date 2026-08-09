@@ -803,6 +803,15 @@ button:disabled {
   background: rgba(0, 103, 192, 0.12);
 }
 
+.file-list li.is-selected {
+  background: rgba(0, 103, 192, 0.16);
+  border-color: rgba(0, 103, 192, 0.35);
+}
+
+.file-list li.is-selected:hover {
+  background: rgba(0, 103, 192, 0.2);
+}
+
 .file-list small {
   color: #617181;
   overflow: hidden;
