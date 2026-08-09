@@ -860,7 +860,7 @@ function App() {
           minimized: false,
         },
       }));
-      setStatus(`Connected to ${parsed.host}`);
+      setStatus('Connected');
     } catch (e) {
       const err = e as VMConnectionError;
       if (err.code === 'HOST_UNTRUSTED') {
@@ -1056,7 +1056,7 @@ function App() {
         {!connected && (!keyLookupDone || autoConnecting) && (
           <div className="auto-connect-status">
             <span className="auto-connect-spinner" />
-            <span>{autoConnecting ? `Connecting to ${profile.name || 'your VM'}…` : 'Loading…'}</span>
+            <span>{autoConnecting ? 'Connecting to VM…' : 'Loading…'}</span>
           </div>
         )}
 
@@ -1385,7 +1385,7 @@ function App() {
                 <img src={startIcon} alt="" className="settings-avatar" />
                 <div>
                   <strong>User</strong>
-                  <span>{connected ? `Connected to ${profile.name}` : status}</span>
+                  <span>{connected ? 'Connected' : status}</span>
                 </div>
               </button>
               {connected && (
