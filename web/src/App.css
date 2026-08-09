@@ -858,6 +858,136 @@ button:disabled {
   background: linear-gradient(#ffd96a, #e9aa2b);
 }
 
+.nav-icon.is-thispc {
+  height: 16px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, #8fd3ff, #0067c0);
+}
+
+/* ---------- This PC ---------- */
+
+.thispc-panel {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px;
+}
+
+.thispc-heading {
+  margin: 0 0 16px;
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: #17212b;
+}
+
+.thispc-status {
+  color: #5f6d7a;
+  font-size: 0.85rem;
+}
+
+.disk-tile {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(320px, 100%);
+  padding: 16px;
+  border: 1px solid rgba(0, 0, 0, 0.1);
+  border-radius: 8px;
+  background: #fff;
+  text-align: left;
+}
+
+.disk-tile:hover {
+  border-color: var(--win-accent);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.08);
+}
+
+.disk-tile-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.disk-tile-header div {
+  display: flex;
+  flex-direction: column;
+}
+
+.disk-tile-path {
+  font-size: 0.75rem;
+  color: #5f6d7a;
+}
+
+.disk-icon {
+  width: 30px;
+  height: 26px;
+  flex-shrink: 0;
+  border-radius: 3px;
+  background: linear-gradient(135deg, #c9e6ff, #7fb8ec);
+  border: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.disk-bar {
+  display: flex;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: #e4e7ea;
+}
+
+.disk-bar-segment {
+  height: 100%;
+}
+
+.disk-bar-segment.is-system {
+  background: #e9822b;
+}
+
+.disk-bar-segment.is-used {
+  background: var(--win-accent);
+}
+
+.disk-bar-segment.is-free {
+  background: #c3c9d0;
+}
+
+.disk-tile-footer {
+  font-size: 0.78rem;
+  color: #3a4552;
+}
+
+.disk-legend {
+  display: flex;
+  gap: 14px;
+  font-size: 0.72rem;
+  color: #5f6d7a;
+}
+
+.disk-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.disk-swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  display: inline-block;
+}
+
+.disk-swatch.is-system {
+  background: #e9822b;
+}
+
+.disk-swatch.is-used {
+  background: var(--win-accent);
+}
+
+.disk-swatch.is-free {
+  background: #c3c9d0;
+}
+
 .explorer-list-pane {
   display: flex;
   flex-direction: column;

@@ -109,6 +109,25 @@ const fileTypeIcon = (fileName: string): string | undefined => {
 const ICON_POSITIONS_KEY = 'vm-desktop-icon-positions';
 const WALLPAPER_KEY = 'vm-desktop-wallpaper';
 
+// A sentinel `path` value (never a real filesystem path, which always starts with "/") for
+// the This PC overview - it rides the same `path`/history/navigateTo machinery as real
+// directories instead of needing a parallel view-state system.
+const THIS_PC = 'this-pc';
+
+const formatBytes = (bytes: number) => {
+  if (!Number.isFinite(bytes) || bytes < 0) {
+    return '—';
+  }
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+};
+
 const snapToGrid = (value: number, grid: number, origin: number) =>
   Math.max(origin, origin + Math.round((value - origin) / grid) * grid);
 
@@ -514,8 +533,16 @@ function App() {
   const [closingApps, setClosingApps] = useState<AppId[]>([]);
   const [previewApp, setPreviewApp] = useState<AppId | null>(null);
   const previewTimeoutRef = useRef<number | null>(null);
-  const [path, setPath] = useState('/');
-  const [addressInput, setAddressInput] = useState('/');
+  const [path, setPath] = useState(THIS_PC);
+  const [addressInput, setAddressInput] = useState('This PC');
+  const [diskUsage, setDiskUsage] = useState<{
+    total: number;
+    free: number;
+    systemUsed: number;
+    homeUsed: number;
+  } | null>(null);
+  const [diskUsageLoading, setDiskUsageLoading] = useState(false);
+  const [diskUsageError, setDiskUsageError] = useState('');
   const [entries, setEntries] = useState<FileEntry[]>([]);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [clock, setClock] = useState(formatTime);
@@ -950,8 +977,51 @@ function App() {
     openOrFocusApp(id);
   };
 
+  // Reads the root filesystem's total/used/free space (fast - `df` is metadata-only) plus
+  // how much of that "used" figure is under /home (a real recursive scan, capped at 5s via
+  // `timeout` so a huge home directory can't hang the panel). Whatever /home isn't accounting
+  // for is attributed to "system" - not perfectly precise, but a reasonable split without
+  // walking the entire filesystem, which would be far too slow to do on every visit.
+  const loadDiskUsage = async () => {
+    setDiskUsageLoading(true);
+    setDiskUsageError('');
+    try {
+      const { output } = await connection.executeCommand(
+        "df -B1 --output=size,used,avail / | tail -1 && timeout 5 du -sB1 /home 2>/dev/null | cut -f1",
+      );
+      const lines = output.trim().split('\n').map((l) => l.trim()).filter(Boolean);
+      const [totalStr, usedStr, freeStr] = (lines[0] ?? '').split(/\s+/);
+      const total = Number(totalStr);
+      const used = Number(usedStr);
+      const free = Number(freeStr);
+      if (!Number.isFinite(total) || !Number.isFinite(used) || !Number.isFinite(free)) {
+        throw new Error('Could not read disk usage.');
+      }
+      const homeUsedRaw = lines[1] ? Number(lines[1]) : 0;
+      const homeUsed = Number.isFinite(homeUsedRaw) ? Math.min(homeUsedRaw, used) : 0;
+      setDiskUsage({ total, free, systemUsed: Math.max(0, used - homeUsed), homeUsed });
+    } catch (e) {
+      const err = e as Partial<VMConnectionError>;
+      setDiskUsageError(err.code ? `${err.code}: ${err.message}` : 'Could not read disk usage.');
+    } finally {
+      setDiskUsageLoading(false);
+    }
+  };
+
   const navigateTo = async (nextPath: string, opts?: { fromHistory?: boolean }) => {
     if (!connected) {
+      return;
+    }
+    if (nextPath === THIS_PC) {
+      setSelectedPath(null);
+      setPath(THIS_PC);
+      setAddressInput('This PC');
+      setExplorerError('');
+      if (!opts?.fromHistory) {
+        setHistory((current) => [...current.slice(0, historyIndex + 1), nextPath]);
+        setHistoryIndex((current) => current + 1);
+      }
+      void loadDiskUsage();
       return;
     }
     try {
@@ -1058,11 +1128,13 @@ function App() {
         name: parsed.host,
       };
       await connection.connect(nextProfile, { userConsent: true });
+      // Prefetch root's listing even though This PC (not root) is the landing view, so
+      // clicking into the disk from there is instant instead of waiting on a fresh request.
       const list = await connection.listDirectory('/');
       setEntries(list);
-      setPath('/');
-      setAddressInput('/');
-      setHistory(['/']);
+      setPath(THIS_PC);
+      setAddressInput('This PC');
+      setHistory([THIS_PC]);
       setHistoryIndex(0);
       setConnected(true);
       setActiveId('files');
@@ -1072,6 +1144,7 @@ function App() {
         current.map((w) => (w.id === 'files' ? { ...w, closed: false, minimized: false } : w)),
       );
       setStatus('Connected');
+      void loadDiskUsage();
     } catch (e) {
       const err = e as VMConnectionError;
       if (err.code === 'HOST_UNTRUSTED') {
@@ -1485,6 +1558,9 @@ function App() {
             <div className="explorer-body">
               <aside>
                 <div className="nav-section-label">Quick access</div>
+                <button className={path === THIS_PC ? 'is-active' : ''} onClick={() => void navigateTo(THIS_PC)} disabled={!connected}>
+                  <span className="nav-icon is-thispc" /> This PC
+                </button>
                 <button className={path === '/' ? 'is-active' : ''} onClick={() => void navigateTo('/')} disabled={!connected}>
                   <span className="nav-icon" /> Root
                 </button>
@@ -1496,45 +1572,88 @@ function App() {
                 </button>
               </aside>
               <div className="explorer-list-pane">
-                <div className="file-list-header">
-                  <span />
-                  <span>Name</span>
-                  <span>Permissions</span>
-                  <span>Size</span>
-                  <span>Date modified</span>
-                </div>
-                <ul className="file-list">
-                  {entries.map((entry) => (
-                    <li
-                      key={entry.path}
-                      className={[
-                        entry.isDirectory ? 'is-directory' : '',
-                        selectedPath === entry.path ? 'is-selected' : '',
-                      ].filter(Boolean).join(' ')}
-                      onClick={() => handleRowClick(entry)}
-                    >
-                      {entry.isDirectory ? (
-                        <span className="file-icon is-folder" />
-                      ) : fileTypeIcon(entry.name) ? (
-                        <img src={fileTypeIcon(entry.name)} alt="" className="file-icon is-typed" />
-                      ) : (
-                        <span className="file-icon" />
+                {path === THIS_PC ? (
+                  <div className="thispc-panel">
+                    <h2 className="thispc-heading">This PC</h2>
+                    {diskUsageLoading && !diskUsage && <p className="thispc-status">Reading disk usage…</p>}
+                    {diskUsageError && <p className="explorer-error">{diskUsageError}</p>}
+                    {diskUsage && (
+                      <button type="button" className="disk-tile" onClick={() => void navigateTo('/')} disabled={!connected}>
+                        <div className="disk-tile-header">
+                          <span className="disk-icon" />
+                          <div>
+                            <strong>Local Disk</strong>
+                            <span className="disk-tile-path">/</span>
+                          </div>
+                        </div>
+                        <div className="disk-bar">
+                          <span
+                            className="disk-bar-segment is-system"
+                            style={{ width: `${(diskUsage.systemUsed / diskUsage.total) * 100}%` }}
+                          />
+                          <span
+                            className="disk-bar-segment is-used"
+                            style={{ width: `${(diskUsage.homeUsed / diskUsage.total) * 100}%` }}
+                          />
+                          <span
+                            className="disk-bar-segment is-free"
+                            style={{ width: `${(diskUsage.free / diskUsage.total) * 100}%` }}
+                          />
+                        </div>
+                        <div className="disk-tile-footer">
+                          <span>{formatBytes(diskUsage.total - diskUsage.free)} used of {formatBytes(diskUsage.total)}</span>
+                        </div>
+                        <div className="disk-legend">
+                          <span><i className="disk-swatch is-system" /> System</span>
+                          <span><i className="disk-swatch is-used" /> Used</span>
+                          <span><i className="disk-swatch is-free" /> Free</span>
+                        </div>
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <div className="file-list-header">
+                      <span />
+                      <span>Name</span>
+                      <span>Permissions</span>
+                      <span>Size</span>
+                      <span>Date modified</span>
+                    </div>
+                    <ul className="file-list">
+                      {entries.map((entry) => (
+                        <li
+                          key={entry.path}
+                          className={[
+                            entry.isDirectory ? 'is-directory' : '',
+                            selectedPath === entry.path ? 'is-selected' : '',
+                          ].filter(Boolean).join(' ')}
+                          onClick={() => handleRowClick(entry)}
+                        >
+                          {entry.isDirectory ? (
+                            <span className="file-icon is-folder" />
+                          ) : fileTypeIcon(entry.name) ? (
+                            <img src={fileTypeIcon(entry.name)} alt="" className="file-icon is-typed" />
+                          ) : (
+                            <span className="file-icon" />
+                          )}
+                          <span>{entry.name}</span>
+                          <small>{entry.permissions}</small>
+                          <small>{entry.size}B</small>
+                          <small>{entry.modifiedAt}</small>
+                        </li>
+                      ))}
+                      {entries.length === 0 && (
+                        <li className="empty-row">
+                          <span>{connected ? 'This folder is empty' : 'Connect to browse files'}</span>
+                        </li>
                       )}
-                      <span>{entry.name}</span>
-                      <small>{entry.permissions}</small>
-                      <small>{entry.size}B</small>
-                      <small>{entry.modifiedAt}</small>
-                    </li>
-                  ))}
-                  {entries.length === 0 && (
-                    <li className="empty-row">
-                      <span>{connected ? 'This folder is empty' : 'Connect to browse files'}</span>
-                    </li>
-                  )}
-                </ul>
-                <div className="explorer-status-bar">
-                  <span>{entries.length} item{entries.length === 1 ? '' : 's'}</span>
-                </div>
+                    </ul>
+                    <div className="explorer-status-bar">
+                      <span>{entries.length} item{entries.length === 1 ? '' : 's'}</span>
+                    </div>
+                  </>
+                )}
               </div>
             </div>
           </section>
