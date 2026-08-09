@@ -864,6 +864,23 @@ function App() {
     void navigateTo(entry.path);
   };
 
+  // Detect double-clicks manually instead of relying on the browser's native "dblclick" event:
+  // two separate click() calls fired close together (real users double-clicking, or automated
+  // clicks) don't always get recognized as a native double-click depending on exact timing, but
+  // are still reliably close together in time — comparing timestamps ourselves is more robust.
+  const lastRowClickRef = useRef<{ path: string; time: number } | null>(null);
+  const handleRowClick = (entry: FileEntry) => {
+    const now = Date.now();
+    const last = lastRowClickRef.current;
+    if (last && last.path === entry.path && now - last.time < 500) {
+      lastRowClickRef.current = null;
+      openFilePath(entry);
+      return;
+    }
+    lastRowClickRef.current = { path: entry.path, time: now };
+    setSelectedPath(entry.path);
+  };
+
   const chooseWallpaperFolder = async () => {
     setWallpaperStatus('');
     const pending = pickLocalDirectory();
@@ -1122,8 +1139,7 @@ function App() {
                         entry.isDirectory ? 'is-directory' : '',
                         selectedPath === entry.path ? 'is-selected' : '',
                       ].filter(Boolean).join(' ')}
-                      onClick={() => setSelectedPath(entry.path)}
-                      onDoubleClick={() => openFilePath(entry)}
+                      onClick={() => handleRowClick(entry)}
                     >
                       <span className={entry.isDirectory ? 'file-icon is-folder' : 'file-icon'} />
                       <span>{entry.name}</span>
