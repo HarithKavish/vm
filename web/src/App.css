@@ -448,16 +448,7 @@ button:disabled {
 }
 
 .app-window.is-maximized {
-  /* Browsers reserve a thin strip at the very top of the screen in real (F11/OS-level)
-     fullscreen — moving the mouse or clicking there is intercepted by the browser itself
-     (it's the hover zone for the "press Esc to exit full screen" hint) and never reaches
-     the page at all. A titlebar sitting flush at top:0 puts its minimize/maximize/close
-     buttons exactly inside that dead strip, so they're unclickable in real fullscreen even
-     though everything else about the window works. Keep a small gap below it. */
-  top: 12px;
-  right: 0;
-  bottom: 0;
-  left: 0;
+  inset: 0;
   width: auto;
   height: auto;
   border-radius: 0;
@@ -1335,10 +1326,7 @@ button:disabled {
   }
 
   .app-window.is-maximized {
-    top: 12px;
-    right: 0;
-    bottom: 0;
-    left: 0;
+    inset: 0;
   }
 
   .explorer-command-bar {
