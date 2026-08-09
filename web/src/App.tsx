@@ -115,6 +115,7 @@ const fileTypeIcon = (fileName: string): string | undefined => {
 
 const ICON_POSITIONS_KEY = 'vm-desktop-icon-positions';
 const WALLPAPER_KEY = 'vm-desktop-wallpaper';
+const WALLPAPER_NAME_KEY = 'vm-desktop-wallpaper-name';
 
 // A sentinel `path` value (never a real filesystem path, which always starts with "/") for
 // the This PC overview - it rides the same `path`/history/navigateTo machinery as real
@@ -557,6 +558,14 @@ function App() {
   const [startSearch, setStartSearch] = useState('');
   const [iconPositions, setIconPositions] = useState<Record<AppId, IconPosition>>(loadIconPositions);
   const [wallpaper, setWallpaper] = useState(() => window.localStorage.getItem(WALLPAPER_KEY) ?? '');
+  // Which currently-listed image is applied, tracked separately from `wallpaper` itself:
+  // `wallpaper` holds a data: URL (so it survives being read back from localStorage after a
+  // reload), but the thumbnail grid's `url` field is a blob: URL from this session's
+  // directory listing - the two are never equal even when the same image is applied, so
+  // comparing them (as this used to) could never highlight anything as active.
+  const [wallpaperActiveName, setWallpaperActiveName] = useState(
+    () => window.localStorage.getItem(WALLPAPER_NAME_KEY) ?? '',
+  );
   const [wallpaperFolder, setWallpaperFolder] = useState('');
   const [wallpaperImages, setWallpaperImages] = useState<{ name: string; url: string }[]>([]);
   const [wallpaperStatus, setWallpaperStatus] = useState('');
@@ -670,12 +679,28 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (wallpaper) {
-      window.localStorage.setItem(WALLPAPER_KEY, wallpaper);
-    } else {
-      window.localStorage.removeItem(WALLPAPER_KEY);
+    try {
+      if (wallpaper) {
+        window.localStorage.setItem(WALLPAPER_KEY, wallpaper);
+      } else {
+        window.localStorage.removeItem(WALLPAPER_KEY);
+      }
+    } catch {
+      // A real photo's data: URL can exceed localStorage's ~5-10MB quota - the wallpaper
+      // still applies for this session either way, it just won't survive a reload. Surface
+      // that instead of leaving an uncaught QuotaExceededError (there's no error boundary
+      // anywhere in this app, so that would otherwise go entirely unexplained).
+      setWallpaperStatus('Wallpaper applied, but the image is too large to remember after a reload.');
     }
   }, [wallpaper]);
+
+  useEffect(() => {
+    if (wallpaperActiveName) {
+      window.localStorage.setItem(WALLPAPER_NAME_KEY, wallpaperActiveName);
+    } else {
+      window.localStorage.removeItem(WALLPAPER_NAME_KEY);
+    }
+  }, [wallpaperActiveName]);
 
   useEffect(() => {
     if (!startOpen) {
@@ -1431,6 +1456,7 @@ function App() {
       const blob = await response.blob();
       const dataUrl = await readFileAsDataUrl(new File([blob], image.name, { type: blob.type }));
       setWallpaper(dataUrl);
+      setWallpaperActiveName(image.name);
       setWallpaperStatus(`Wallpaper set to ${image.name}.`);
     } catch {
       setWallpaperStatus('Could not apply that image as wallpaper.');
@@ -1906,7 +1932,13 @@ function App() {
                   <button onClick={() => void chooseWallpaperFolder()}>Choose folder</button>
                   {wallpaperFolder && <span className="settings-folder-label">{wallpaperFolder}</span>}
                   {wallpaper && (
-                    <button className="settings-secondary" onClick={() => setWallpaper('')}>
+                    <button
+                      className="settings-secondary"
+                      onClick={() => {
+                        setWallpaper('');
+                        setWallpaperActiveName('');
+                      }}
+                    >
                       Clear wallpaper
                     </button>
                   )}
@@ -1922,7 +1954,7 @@ function App() {
                     {wallpaperImages.map((image) => (
                       <button
                         key={image.url}
-                        className={wallpaper && image.url === wallpaper ? 'wallpaper-thumb is-active' : 'wallpaper-thumb'}
+                        className={image.name === wallpaperActiveName ? 'wallpaper-thumb is-active' : 'wallpaper-thumb'}
                         onClick={() => void applyWallpaper(image)}
                         title={image.name}
                       >
