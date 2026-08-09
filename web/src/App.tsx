@@ -701,6 +701,7 @@ function App() {
       setSelectedPath(null);
       setPath(nextPath);
       setAddressInput(nextPath);
+      setError('');
       if (!opts?.fromHistory) {
         setHistory((current) => [...current.slice(0, historyIndex + 1), nextPath]);
         setHistoryIndex((current) => current + 1);
@@ -1110,6 +1111,7 @@ function App() {
                 />
               </div>
             </div>
+            {error && <p className="explorer-error">{error}</p>}
             <div className="explorer-body">
               <aside>
                 <div className="nav-section-label">Quick access</div>

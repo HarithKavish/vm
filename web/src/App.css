@@ -669,6 +669,16 @@ button:disabled {
   background: rgba(255, 255, 255, 0.6);
 }
 
+.explorer-error {
+  flex-shrink: 0;
+  margin: 0;
+  padding: 8px 14px;
+  background: rgba(196, 43, 28, 0.1);
+  border-bottom: 1px solid rgba(196, 43, 28, 0.25);
+  color: #a02020;
+  font-size: 0.82rem;
+}
+
 .cmd-arrow {
   width: 30px;
   height: 30px;
