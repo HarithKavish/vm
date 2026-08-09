@@ -314,6 +314,7 @@ function App() {
   const [connected, setConnected] = useState(false);
   const [status, setStatus] = useState('Choose a key');
   const [error, setError] = useState('');
+  const [explorerError, setExplorerError] = useState('');
   const [active, setActive] = useState<AppId>('files');
   const [windows, setWindows] = useState(defaultWindows);
   const [path, setPath] = useState('/');
@@ -701,14 +702,14 @@ function App() {
       setSelectedPath(null);
       setPath(nextPath);
       setAddressInput(nextPath);
-      setError('');
+      setExplorerError('');
       if (!opts?.fromHistory) {
         setHistory((current) => [...current.slice(0, historyIndex + 1), nextPath]);
         setHistoryIndex((current) => current + 1);
       }
     } catch (e) {
       const err = e as VMConnectionError;
-      setError(`${err.code}: ${err.message}`);
+      setExplorerError(`${err.code}: ${err.message}`);
     }
   };
 
@@ -1111,7 +1112,7 @@ function App() {
                 />
               </div>
             </div>
-            {error && <p className="explorer-error">{error}</p>}
+            {explorerError && <p className="explorer-error">{explorerError}</p>}
             <div className="explorer-body">
               <aside>
                 <div className="nav-section-label">Quick access</div>
