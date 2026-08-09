@@ -1275,12 +1275,12 @@ function App() {
           >
             <img src={startIcon} alt="" className="start-icon" />
           </button>
-          {APPS.filter((app) => app.id !== 'settings').map((app) => (
+          {APPS.filter((app) => !windows[app.id].closed).map((app) => (
             <button
               key={app.id}
               aria-label={app.name}
               title={app.name}
-              className={active === app.id && !windows[app.id].minimized && !windows[app.id].closed ? 'taskbar-app is-active' : 'taskbar-app'}
+              className={active === app.id && !windows[app.id].minimized ? 'taskbar-app is-active' : 'taskbar-app'}
               onClick={() => toggleApp(app.id)}
               disabled={app.requiresConnection && !connected}
             >
