@@ -7,6 +7,7 @@ import startIcon from './assets/start-icon.svg';
 import folderIcon from './assets/icon-folder.svg';
 import terminalIcon from './assets/icon-terminal.svg';
 import settingsIcon from './assets/icon-settings.svg';
+import notepadIcon from './assets/icon-notepad.svg';
 import {
   ExtensionVMConnection,
   type ConnectionProfile,
@@ -15,7 +16,7 @@ import {
 } from './connection';
 import { getStoredHandle, setStoredHandle } from './handles';
 
-type AppId = 'files' | 'terminal' | 'settings';
+type AppId = 'files' | 'terminal' | 'settings' | 'notepad';
 type Screen = 'lock' | 'login' | 'desktop';
 type SnapZone = 'left' | 'right' | 'top';
 type WindowState = {
@@ -41,12 +42,14 @@ type AppDescriptor = {
 const APPS: AppDescriptor[] = [
   { id: 'files', name: 'File Explorer', icon: folderIcon, requiresConnection: true },
   { id: 'terminal', name: 'Terminal', icon: terminalIcon, requiresConnection: true },
+  { id: 'notepad', name: 'Notepad', icon: notepadIcon, requiresConnection: true },
   { id: 'settings', name: 'Settings', icon: settingsIcon, requiresConnection: false },
 ];
 
 const defaultWindows: Record<AppId, WindowState> = {
   files: { closed: false, minimized: false, maximized: false, snapped: null, x: 132, y: 34, zIndex: 0 },
   terminal: { closed: true, minimized: false, maximized: false, snapped: null, x: 176, y: 78, zIndex: 0 },
+  notepad: { closed: true, minimized: false, maximized: false, snapped: null, x: 250, y: 90, zIndex: 0 },
   settings: { closed: true, minimized: false, maximized: false, snapped: null, x: 210, y: 60, zIndex: 0 },
 };
 
@@ -58,7 +61,30 @@ const ICON_ORIGIN_Y = 0;
 const defaultIconPositions: Record<AppId, IconPosition> = {
   files: { x: ICON_ORIGIN_X, y: ICON_ORIGIN_Y },
   terminal: { x: ICON_ORIGIN_X, y: ICON_ORIGIN_Y + ICON_GRID_Y },
-  settings: { x: ICON_ORIGIN_X, y: ICON_ORIGIN_Y + ICON_GRID_Y * 2 },
+  notepad: { x: ICON_ORIGIN_X, y: ICON_ORIGIN_Y + ICON_GRID_Y * 2 },
+  settings: { x: ICON_ORIGIN_X, y: ICON_ORIGIN_Y + ICON_GRID_Y * 3 },
+};
+
+// Which app opens a file of a given extension by default - currently just Notepad for
+// plain text files. Extend this map (and give the new app an icon) to add more associations.
+const DEFAULT_APP_BY_EXTENSION: Partial<Record<string, AppId>> = {
+  txt: 'notepad',
+};
+
+const FILE_TYPE_ICONS: Partial<Record<AppId, string>> = {
+  notepad: notepadIcon,
+};
+
+const fileExtension = (name: string) => {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : '';
+};
+
+const defaultAppFor = (fileName: string): AppId | undefined => DEFAULT_APP_BY_EXTENSION[fileExtension(fileName)];
+
+const fileTypeIcon = (fileName: string): string | undefined => {
+  const appId = defaultAppFor(fileName);
+  return appId ? FILE_TYPE_ICONS[appId] : undefined;
 };
 
 const ICON_POSITIONS_KEY = 'vm-desktop-icon-positions';
@@ -457,6 +483,12 @@ function App() {
   const [status, setStatus] = useState('Choose a key');
   const [error, setError] = useState('');
   const [explorerError, setExplorerError] = useState('');
+  const [notepadPath, setNotepadPath] = useState<string | null>(null);
+  const [notepadContent, setNotepadContent] = useState('');
+  const [notepadSavedContent, setNotepadSavedContent] = useState('');
+  const [notepadLoading, setNotepadLoading] = useState(false);
+  const [notepadSaving, setNotepadSaving] = useState(false);
+  const [notepadError, setNotepadError] = useState('');
   const [active, setActive] = useState<AppId>('files');
   const [windows, setWindows] = useState(defaultWindows);
   const zCounterRef = useRef(1);
@@ -1035,13 +1067,64 @@ function App() {
     setConnected(false);
     setStatus('Disconnected');
     setEntries([]);
+    setNotepadPath(null);
+    setNotepadContent('');
+    setNotepadSavedContent('');
+    setNotepadError('');
+  };
+
+  const notepadDirty = notepadContent !== notepadSavedContent;
+
+  const openInNotepad = async (entry: FileEntry) => {
+    if (notepadDirty && notepadPath && notepadPath !== entry.path) {
+      const fileName = notepadPath.split('/').pop() || notepadPath;
+      if (!window.confirm(`Discard unsaved changes to ${fileName}?`)) {
+        return;
+      }
+    }
+    bringToFront('notepad', { closed: false, minimized: false });
+    setNotepadPath(entry.path);
+    setNotepadContent('');
+    setNotepadSavedContent('');
+    setNotepadError('');
+    setNotepadLoading(true);
+    try {
+      const content = await connection.readFile(entry.path);
+      setNotepadContent(content);
+      setNotepadSavedContent(content);
+    } catch (e) {
+      const err = e as VMConnectionError;
+      setNotepadError(`${err.code}: ${err.message}`);
+    } finally {
+      setNotepadLoading(false);
+    }
+  };
+
+  const saveNotepad = async () => {
+    if (!notepadPath || notepadSaving) {
+      return;
+    }
+    setNotepadSaving(true);
+    setNotepadError('');
+    try {
+      await connection.writeFile(notepadPath, notepadContent);
+      setNotepadSavedContent(notepadContent);
+    } catch (e) {
+      const err = e as VMConnectionError;
+      setNotepadError(`${err.code}: ${err.message}`);
+    } finally {
+      setNotepadSaving(false);
+    }
   };
 
   const openFilePath = (entry: FileEntry) => {
-    if (!entry.isDirectory) {
+    if (entry.isDirectory) {
+      void navigateTo(entry.path);
       return;
     }
-    void navigateTo(entry.path);
+    if (defaultAppFor(entry.name) === 'notepad') {
+      void openInNotepad(entry);
+    }
   };
 
   // Detect double-clicks manually instead of relying on the browser's native "dblclick" event:
@@ -1324,7 +1407,13 @@ function App() {
                       ].filter(Boolean).join(' ')}
                       onClick={() => handleRowClick(entry)}
                     >
-                      <span className={entry.isDirectory ? 'file-icon is-folder' : 'file-icon'} />
+                      {entry.isDirectory ? (
+                        <span className="file-icon is-folder" />
+                      ) : fileTypeIcon(entry.name) ? (
+                        <img src={fileTypeIcon(entry.name)} alt="" className="file-icon is-typed" />
+                      ) : (
+                        <span className="file-icon" />
+                      )}
                       <span>{entry.name}</span>
                       <small>{entry.permissions}</small>
                       <small>{entry.size}B</small>
@@ -1364,6 +1453,62 @@ function App() {
               </div>
             </header>
             <div ref={terminalNodeRef} className="terminal-pane" />
+          </section>
+        )}
+
+        {connected && !windows.notepad.closed && (
+          <section
+            ref={(el) => { windowElRefs.current.notepad = el ?? undefined; }}
+            className={windowClassName('notepad', 'notepad-window')}
+            style={windowInlineStyle('notepad')}
+            onPointerDown={() => bringToFront('notepad')}
+          >
+            <header className="window-titlebar" onPointerDown={(event) => beginDrag('notepad', event)}>
+              <img src={notepadIcon} alt="" className="titlebar-icon" />
+              <span>
+                {notepadDirty ? '*' : ''}
+                {notepadPath ? notepadPath.split('/').pop() || notepadPath : 'Untitled'} - Notepad
+              </span>
+              <div className="window-controls">
+                <button aria-label="Minimize" onPointerDown={(event) => event.stopPropagation()} onClick={() => minimizeWindow('notepad')} />
+                <button aria-label="Maximize" onPointerDown={(event) => event.stopPropagation()} onClick={() => maximizeWindow('notepad')} />
+                <button
+                  className="is-close"
+                  aria-label="Close"
+                  onPointerDown={(event) => event.stopPropagation()}
+                  onClick={() => {
+                    if (notepadDirty && !window.confirm('Discard unsaved changes?')) {
+                      return;
+                    }
+                    closeWindow('notepad');
+                  }}
+                />
+              </div>
+            </header>
+            <div className="notepad-toolbar">
+              <button onClick={() => void saveNotepad()} disabled={!notepadPath || notepadLoading || notepadSaving}>
+                {notepadSaving ? 'Saving…' : 'Save'}
+              </button>
+              {notepadError && <span className="notepad-error">{notepadError}</span>}
+            </div>
+            <textarea
+              className="notepad-textarea"
+              value={notepadContent}
+              onChange={(e) => setNotepadContent(e.target.value)}
+              onKeyDown={(e) => {
+                if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
+                  e.preventDefault();
+                  void saveNotepad();
+                }
+              }}
+              placeholder={notepadLoading ? 'Loading…' : 'Open a .txt file from File Explorer to edit it here.'}
+              disabled={notepadLoading}
+              spellCheck={false}
+            />
+            <div className="notepad-status-bar">
+              <span>{notepadPath ?? 'No file open'}</span>
+              <span>{notepadDirty ? 'Unsaved changes' : notepadPath ? 'Saved' : ''}</span>
+            </div>
           </section>
         )}
 

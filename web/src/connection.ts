@@ -43,6 +43,8 @@ export interface VMConnection {
   disconnect(): Promise<void>;
   executeCommand(command: string): Promise<{ output: string; exitCode: number }>;
   listDirectory(path: string): Promise<FileEntry[]>;
+  readFile(path: string): Promise<string>;
+  writeFile(path: string, content: string): Promise<void>;
 }
 
 type BridgeRequest<TPayload = unknown> = {
@@ -134,5 +136,17 @@ export class ExtensionVMConnection implements VMConnection {
       path,
     });
     return res.entries;
+  }
+
+  async readFile(path: string): Promise<string> {
+    const res = await requestExtension<{ path: string }, { content: string }>('read-file', { path });
+    return res.content;
+  }
+
+  async writeFile(path: string, content: string): Promise<void> {
+    await requestExtension<{ path: string; content: string }, { status: string }>('write-file', {
+      path,
+      content,
+    });
   }
 }

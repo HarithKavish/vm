@@ -65,6 +65,15 @@ type listDirectoryPayload struct {
 	Path string `json:"path"`
 }
 
+type readFilePayload struct {
+	Path string `json:"path"`
+}
+
+type writeFilePayload struct {
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
 type fileEntry struct {
 	Name       string `json:"name"`
 	Path       string `json:"path"`
@@ -156,6 +165,25 @@ func (c *companion) handle(req request) response {
 			return mapError(req.RequestID, err)
 		}
 		return ok(req.RequestID, map[string]any{"entries": entries})
+	case "read-file":
+		var payload readFilePayload
+		if err := json.Unmarshal(req.Payload, &payload); err != nil {
+			return fail(req.RequestID, "UNKNOWN", "Invalid read file payload")
+		}
+		content, err := c.readFile(payload.Path)
+		if err != nil {
+			return mapError(req.RequestID, err)
+		}
+		return ok(req.RequestID, map[string]string{"content": content})
+	case "write-file":
+		var payload writeFilePayload
+		if err := json.Unmarshal(req.Payload, &payload); err != nil {
+			return fail(req.RequestID, "UNKNOWN", "Invalid write file payload")
+		}
+		if err := c.writeFile(payload.Path, payload.Content); err != nil {
+			return mapError(req.RequestID, err)
+		}
+		return ok(req.RequestID, map[string]string{"status": "saved"})
 	default:
 		return fail(req.RequestID, "UNKNOWN", "Unsupported request type")
 	}
@@ -345,6 +373,45 @@ func (c *companion) listDirectory(dirPath string) ([]fileEntry, error) {
 		})
 	}
 	return items, nil
+}
+
+// maxReadFileBytes bounds what readFile will load into memory - plenty for a lightweight
+// text editor, and keeps a huge/binary file from ever landing in the UI as a giant string.
+const maxReadFileBytes = 4 << 20 // 4 MiB
+
+func (c *companion) readFile(filePath string) (string, error) {
+	if c.sftpClient == nil {
+		return "", fmt.Errorf("%w: not connected", errNetwork)
+	}
+	f, err := c.sftpClient.Open(filePath)
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", errRemoteCommand, err)
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(io.LimitReader(f, maxReadFileBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("%w: %v", errRemoteCommand, err)
+	}
+	if len(data) > maxReadFileBytes {
+		return "", fmt.Errorf("%w: file is larger than %d MiB", errRemoteCommand, maxReadFileBytes>>20)
+	}
+	return string(data), nil
+}
+
+func (c *companion) writeFile(filePath, content string) error {
+	if c.sftpClient == nil {
+		return fmt.Errorf("%w: not connected", errNetwork)
+	}
+	f, err := c.sftpClient.Create(filePath)
+	if err != nil {
+		return fmt.Errorf("%w: %v", errRemoteCommand, err)
+	}
+	defer f.Close()
+	if _, err := f.Write([]byte(content)); err != nil {
+		return fmt.Errorf("%w: %v", errRemoteCommand, err)
+	}
+	return nil
 }
 
 func (c *companion) loadKnownHosts() error {
