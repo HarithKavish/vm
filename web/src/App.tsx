@@ -238,11 +238,56 @@ const useTerminal = (
     fitRef.current = fitAddon;
 
     let input = '';
+    let cursor = 0;
+    const history: string[] = [];
+    let historyIndex = 0;
+    let historyDraft = '';
     const cwdRef: { current: string | null } = { current: null };
     const prompt = () => terminal.write(`\r\nubuntu@vm:${cwdRef.current ?? '~'}$ `);
 
+    // Returns the cursor to the start of the current input, erases to end of line, writes
+    // nextInput, then repositions the cursor at nextCursor - the one place that redraws the
+    // line, used by history recall and mid-line edits so the visible line always matches
+    // `input`/`cursor` exactly.
+    const setLine = (nextInput: string, nextCursor: number) => {
+      if (cursor > 0) {
+        terminal.write(`\x1b[${cursor}D`);
+      }
+      terminal.write('\x1b[K');
+      terminal.write(nextInput);
+      const trailing = nextInput.length - nextCursor;
+      if (trailing > 0) {
+        terminal.write(`\x1b[${trailing}D`);
+      }
+      input = nextInput;
+      cursor = nextCursor;
+    };
+
+    // A leading ~ needs to stay unquoted to still trigger the remote shell's tilde
+    // expansion ($HOME) - quoting it (as shellQuote would) makes bash treat it as a
+    // literal directory named "~", which doesn't exist. Only the part after it, if any,
+    // gets quoted, so `cd ~/some dir` still can't break out into shell injection.
+    const cdTargetArg = (target: string) => {
+      if (target === '~') {
+        return '~';
+      }
+      if (target.startsWith('~/')) {
+        return `~/${shellQuote(target.slice(2))}`;
+      }
+      return shellQuote(target);
+    };
+
     terminal.write('VM Desktop Terminal');
-    prompt();
+    // Seed the prompt with the real starting directory instead of assuming ~ - the SSH
+    // session's actual login directory is whatever the server configured, and showing an
+    // unverified guess is worse than one extra round trip before the first prompt.
+    void (async () => {
+      const result = await commandRef.current('pwd');
+      if (result.ok && result.exitCode === 0) {
+        cwdRef.current = result.text.trim() || cwdRef.current;
+      }
+      prompt();
+    })();
 
     terminal.onData(async (data) => {
       if (!connectedRef.current) {
@@ -252,17 +297,23 @@ const useTerminal = (
         const raw = input.trim();
         terminal.write('\r\n');
         input = '';
+        cursor = 0;
         if (!raw) {
+          historyIndex = history.length;
           prompt();
           return;
         }
+        if (history[history.length - 1] !== raw) {
+          history.push(raw);
+        }
+        historyIndex = history.length;
 
         const cdMatch = raw.match(/^cd(?:\s+(.*))?$/);
         if (cdMatch) {
-          const target = (cdMatch[1] ?? '').trim() || '~';
+          const targetArg = cdTargetArg((cdMatch[1] ?? '').trim() || '~');
           const cdCmd = cwdRef.current
-            ? `cd ${shellQuote(cwdRef.current)} 2>/dev/null; cd ${shellQuote(target)} 2>&1 && pwd`
-            : `cd ${shellQuote(target)} 2>&1 && pwd`;
+            ? `cd ${shellQuote(cwdRef.current)} 2>/dev/null; cd ${targetArg} 2>&1 && pwd`
+            : `cd ${targetArg} 2>&1 && pwd`;
           const result = await commandRef.current(cdCmd);
           if (result.ok && result.exitCode === 0) {
             cwdRef.current = result.text.trim().split('\n').pop() || cwdRef.current;
@@ -287,15 +338,100 @@ const useTerminal = (
         prompt();
         return;
       }
+
       if (data === '\x7f') {
-        if (input.length > 0) {
-          input = input.slice(0, -1);
-          terminal.write('\b \b');
+        if (cursor > 0) {
+          setLine(input.slice(0, cursor - 1) + input.slice(cursor), cursor - 1);
         }
         return;
       }
-      input += data;
-      terminal.write(data);
+      if (data === '\x1b[3~') {
+        if (cursor < input.length) {
+          setLine(input.slice(0, cursor) + input.slice(cursor + 1), cursor);
+        }
+        return;
+      }
+      if (data === '\x1b[A') {
+        if (history.length === 0) {
+          return;
+        }
+        if (historyIndex === history.length) {
+          historyDraft = input;
+        }
+        historyIndex = Math.max(0, historyIndex - 1);
+        const next = history[historyIndex] ?? '';
+        setLine(next, next.length);
+        return;
+      }
+      if (data === '\x1b[B') {
+        if (historyIndex >= history.length) {
+          return;
+        }
+        historyIndex += 1;
+        const next = historyIndex === history.length ? historyDraft : history[historyIndex];
+        setLine(next, next.length);
+        return;
+      }
+      if (data === '\x1b[C') {
+        if (cursor < input.length) {
+          terminal.write('\x1b[C');
+          cursor += 1;
+        }
+        return;
+      }
+      if (data === '\x1b[D') {
+        if (cursor > 0) {
+          terminal.write('\x1b[D');
+          cursor -= 1;
+        }
+        return;
+      }
+      if (data === '\x1b[H' || data === '\x1bOH' || data === '\x01') {
+        if (cursor > 0) {
+          terminal.write(`\x1b[${cursor}D`);
+          cursor = 0;
+        }
+        return;
+      }
+      if (data === '\x1b[F' || data === '\x1bOF' || data === '\x05') {
+        if (cursor < input.length) {
+          terminal.write(`\x1b[${input.length - cursor}C`);
+          cursor = input.length;
+        }
+        return;
+      }
+      if (data === '\x03') {
+        terminal.write('^C');
+        input = '';
+        cursor = 0;
+        historyIndex = history.length;
+        prompt();
+        return;
+      }
+      if (data === '\x0c') {
+        terminal.clear();
+        terminal.write(`ubuntu@vm:${cwdRef.current ?? '~'}$ ${input}`);
+        const trailing = input.length - cursor;
+        if (trailing > 0) {
+          terminal.write(`\x1b[${trailing}D`);
+        }
+        return;
+      }
+
+      // Any other escape sequence (function keys, unsupported combos, ...) or stray
+      // control character: swallow it instead of leaking raw bytes into the command line,
+      // which used to get sent straight to the remote shell as garbage input.
+      if (data.startsWith('\x1b') || (data.length === 1 && data.charCodeAt(0) < 0x20)) {
+        return;
+      }
+
+      if (cursor === input.length) {
+        input += data;
+        cursor += data.length;
+        terminal.write(data);
+      } else {
+        setLine(input.slice(0, cursor) + data + input.slice(cursor), cursor + data.length);
+      }
     });
 
     const onResize = () => fitAddon.fit();
