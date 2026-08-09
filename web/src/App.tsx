@@ -1,4 +1,4 @@
-import { type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { type CSSProperties, type PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from 'react';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import '@xterm/xterm/css/xterm.css';
@@ -25,6 +25,7 @@ type WindowState = {
   snapped: SnapZone | null;
   x: number;
   y: number;
+  zIndex: number;
 };
 type IconPosition = { x: number; y: number };
 
@@ -44,9 +45,9 @@ const APPS: AppDescriptor[] = [
 ];
 
 const defaultWindows: Record<AppId, WindowState> = {
-  files: { closed: false, minimized: false, maximized: false, snapped: null, x: 132, y: 34 },
-  terminal: { closed: true, minimized: false, maximized: false, snapped: null, x: 176, y: 78 },
-  settings: { closed: true, minimized: false, maximized: false, snapped: null, x: 210, y: 60 },
+  files: { closed: false, minimized: false, maximized: false, snapped: null, x: 132, y: 34, zIndex: 0 },
+  terminal: { closed: true, minimized: false, maximized: false, snapped: null, x: 176, y: 78, zIndex: 0 },
+  settings: { closed: true, minimized: false, maximized: false, snapped: null, x: 210, y: 60, zIndex: 0 },
 };
 
 const ICON_GRID_X = 96;
@@ -182,7 +183,10 @@ const readFileAsDataUrl = (file: File): Promise<string> =>
     reader.readAsDataURL(file);
   });
 
-type CommandResult = { ok: boolean; text: string };
+// `ok: false` means the request itself failed (transport/auth/protocol - see VMConnectionError).
+// A command that ran but exited non-zero is still `ok: true`, with the real exit code in
+// `exitCode` and its stdout/stderr (whatever the remote shell wrote) in `text`.
+type CommandResult = { ok: boolean; text: string; exitCode?: number };
 
 const shellQuote = (value: string) => `'${value.replace(/'/g, "'\\''")}'`;
 
@@ -260,10 +264,10 @@ const useTerminal = (
             ? `cd ${shellQuote(cwdRef.current)} 2>/dev/null; cd ${shellQuote(target)} 2>&1 && pwd`
             : `cd ${shellQuote(target)} 2>&1 && pwd`;
           const result = await commandRef.current(cdCmd);
-          if (result.ok) {
+          if (result.ok && result.exitCode === 0) {
             cwdRef.current = result.text.trim().split('\n').pop() || cwdRef.current;
           } else {
-            terminal.write(`\x1b[31m${result.text}\x1b[0m`);
+            terminal.write(`\x1b[31m${result.text.trim() || `exit status ${result.exitCode}`}\x1b[0m`);
           }
           prompt();
           return;
@@ -273,10 +277,12 @@ const useTerminal = (
           ? `cd ${shellQuote(cwdRef.current)} 2>/dev/null; ${raw}`
           : raw;
         const result = await commandRef.current(wrapped);
-        if (result.ok) {
-          terminal.write(result.text || '(no output)');
-        } else {
+        if (!result.ok) {
           terminal.write(`\x1b[31m${result.text}\x1b[0m`);
+        } else if (result.exitCode !== 0) {
+          terminal.write(result.text ? `\x1b[31m${result.text}\x1b[0m` : `\x1b[31mexit status ${result.exitCode}\x1b[0m`);
+        } else {
+          terminal.write(result.text || '(no output)');
         }
         prompt();
         return;
@@ -317,6 +323,7 @@ function App() {
   const [explorerError, setExplorerError] = useState('');
   const [active, setActive] = useState<AppId>('files');
   const [windows, setWindows] = useState(defaultWindows);
+  const zCounterRef = useRef(1);
   // Apps mid-exit-animation on the taskbar: closeWindow marks the window closed immediately
   // (business state), but keeps the icon mounted here a bit longer so it can play the
   // shrink/fade-out animation instead of vanishing instantly.
@@ -494,8 +501,8 @@ function App() {
 
   const execute = async (command: string): Promise<CommandResult> => {
     try {
-      const text = await connection.executeCommand(command);
-      return { ok: true, text };
+      const { output, exitCode } = await connection.executeCommand(command);
+      return { ok: true, text: output, exitCode };
     } catch (e) {
       const err = e as VMConnectionError;
       const text = `${err.code}: ${err.message}`;
@@ -506,17 +513,44 @@ function App() {
 
   const terminalNodeRef = useTerminal(execute, connected);
 
-  const openWindow = (id: AppId) => {
+  // Bumps a window's z-index above every other window and marks it active - the single
+  // path all "bring this window forward" interactions (open, click, drag, maximize) go
+  // through, so the topmost window and the active one never drift apart.
+  const bringToFront = (id: AppId, patch?: Partial<WindowState> | ((w: WindowState) => Partial<WindowState>)) => {
+    zCounterRef.current += 1;
+    const z = zCounterRef.current;
     setActive(id);
-    setStartOpen(false);
     setWindows((current) => ({
       ...current,
-      [id]: {
-        ...current[id],
-        closed: false,
-        minimized: false,
-      },
+      [id]: { ...current[id], ...(typeof patch === 'function' ? patch(current[id]) : patch), zIndex: z },
     }));
+  };
+
+  // When the active window is hidden (minimized/closed), focus whichever remaining
+  // visible window is now topmost - otherwise `active` keeps pointing at a hidden
+  // window and nothing on screen reads as focused.
+  const focusTopmostVisible = (excludeId: AppId) => {
+    let nextId: AppId | null = null;
+    let bestZ = -Infinity;
+    for (const app of APPS) {
+      if (app.id === excludeId) {
+        continue;
+      }
+      const w = windows[app.id];
+      if (w.closed || w.minimized || w.zIndex <= bestZ) {
+        continue;
+      }
+      bestZ = w.zIndex;
+      nextId = app.id;
+    }
+    if (nextId) {
+      setActive(nextId);
+    }
+  };
+
+  const openWindow = (id: AppId) => {
+    setStartOpen(false);
+    bringToFront(id, { closed: false, minimized: false });
   };
 
   const minimizeWindow = (id: AppId) => {
@@ -527,6 +561,9 @@ function App() {
         minimized: true,
       },
     }));
+    if (active === id) {
+      focusTopmostVisible(id);
+    }
   };
 
   const toggleApp = (id: AppId) => {
@@ -539,16 +576,7 @@ function App() {
   };
 
   const maximizeWindow = (id: AppId) => {
-    setActive(id);
-    setWindows((current) => ({
-      ...current,
-      [id]: {
-        ...current[id],
-        maximized: !current[id].maximized,
-        minimized: false,
-        snapped: null,
-      },
-    }));
+    bringToFront(id, (w) => ({ maximized: !w.maximized, minimized: false, snapped: null }));
   };
 
   const TASKBAR_EXIT_MS = 160;
@@ -568,6 +596,9 @@ function App() {
         maximized: false,
       },
     }));
+    if (active === id) {
+      focusTopmostVisible(id);
+    }
   };
 
   const beginDrag = (id: AppId, event: ReactPointerEvent<HTMLElement>) => {
@@ -584,7 +615,7 @@ function App() {
     const pointerId = event.pointerId;
     const titlebar = event.currentTarget;
     titlebar.setPointerCapture(pointerId);
-    setActive(id);
+    bringToFront(id);
 
     if (wasSnapped) {
       setWindows((current) => ({
@@ -959,8 +990,10 @@ function App() {
       .filter(Boolean)
       .join(' ');
 
-  const windowInlineStyle = (id: AppId) =>
-    windows[id].maximized || windows[id].snapped ? undefined : { left: windows[id].x, top: windows[id].y };
+  const windowInlineStyle = (id: AppId): CSSProperties => ({
+    zIndex: windows[id].zIndex,
+    ...(windows[id].maximized || windows[id].snapped ? {} : { left: windows[id].x, top: windows[id].y }),
+  });
 
   const backgroundStyle = wallpaper
     ? { backgroundImage: `url(${wallpaper})`, backgroundSize: 'cover', backgroundPosition: 'center' }
@@ -1080,7 +1113,7 @@ function App() {
             ref={(el) => { windowElRefs.current.files = el ?? undefined; }}
             className={windowClassName('files', 'explorer-window')}
             style={windowInlineStyle('files')}
-            onPointerDown={() => setActive('files')}
+            onPointerDown={() => bringToFront('files')}
           >
             <header className="window-titlebar" onPointerDown={(event) => beginDrag('files', event)}>
               <img src={folderIcon} alt="" className="titlebar-icon" />
@@ -1181,7 +1214,7 @@ function App() {
             ref={(el) => { windowElRefs.current.terminal = el ?? undefined; }}
             className={windowClassName('terminal', 'terminal-window')}
             style={windowInlineStyle('terminal')}
-            onPointerDown={() => setActive('terminal')}
+            onPointerDown={() => bringToFront('terminal')}
           >
             <header className="window-titlebar is-dark" onPointerDown={(event) => beginDrag('terminal', event)}>
               <div className="terminal-tab">
@@ -1203,7 +1236,7 @@ function App() {
             ref={(el) => { windowElRefs.current.settings = el ?? undefined; }}
             className={windowClassName('settings', 'settings-window')}
             style={windowInlineStyle('settings')}
-            onPointerDown={() => setActive('settings')}
+            onPointerDown={() => bringToFront('settings')}
           >
             <header className="window-titlebar" onPointerDown={(event) => beginDrag('settings', event)}>
               <img src={settingsIcon} alt="" className="titlebar-icon" />

@@ -141,11 +141,11 @@ func (c *companion) handle(req request) response {
 		if err := json.Unmarshal(req.Payload, &payload); err != nil {
 			return fail(req.RequestID, "UNKNOWN", "Invalid command payload")
 		}
-		out, err := c.execute(payload.Command)
+		out, exitCode, err := c.execute(payload.Command)
 		if err != nil {
 			return mapError(req.RequestID, err)
 		}
-		return ok(req.RequestID, map[string]string{"output": out})
+		return ok(req.RequestID, map[string]any{"output": out, "exitCode": exitCode})
 	case "list-directory":
 		var payload listDirectoryPayload
 		if err := json.Unmarshal(req.Payload, &payload); err != nil {
@@ -279,13 +279,18 @@ func (c *companion) disconnect() error {
 	return nil
 }
 
-func (c *companion) execute(command string) (string, error) {
+// execute runs command in a remote shell and returns its combined output and exit code.
+// A non-zero exit (e.g. `cd missing-dir`, `grep` with no match) surfaces as a *ssh.ExitError
+// and is treated as a normal, successful result here - not a failure of execute() itself.
+// Any other error means the command never got a chance to run (session/transport failure),
+// which is the real error case.
+func (c *companion) execute(command string) (string, int, error) {
 	if c.sshClient == nil {
-		return "", fmt.Errorf("%w: not connected", errNetwork)
+		return "", -1, fmt.Errorf("%w: not connected", errNetwork)
 	}
 	session, err := c.sshClient.NewSession()
 	if err != nil {
-		return "", fmt.Errorf("%w: unable to open session", errNetwork)
+		return "", -1, fmt.Errorf("%w: unable to open session", errNetwork)
 	}
 	defer session.Close()
 
@@ -293,10 +298,15 @@ func (c *companion) execute(command string) (string, error) {
 	session.Stdout = &b
 	session.Stderr = &b
 
-	if err := session.Run(command); err != nil {
-		return "", fmt.Errorf("%w: %v", errRemoteCommand, err)
+	runErr := session.Run(command)
+	if runErr == nil {
+		return b.String(), 0, nil
 	}
-	return b.String(), nil
+	var exitErr *ssh.ExitError
+	if errors.As(runErr, &exitErr) {
+		return b.String(), exitErr.ExitStatus(), nil
+	}
+	return "", -1, fmt.Errorf("%w: %v", errRemoteCommand, runErr)
 }
 
 func (c *companion) listDirectory(dirPath string) ([]fileEntry, error) {

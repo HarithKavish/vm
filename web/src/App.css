@@ -448,7 +448,6 @@ button:disabled {
 }
 
 .app-window.is-focused {
-  z-index: 8;
   border-color: rgba(0, 0, 0, 0.16);
   box-shadow: 0 28px 90px rgba(0, 0, 0, 0.46);
 }

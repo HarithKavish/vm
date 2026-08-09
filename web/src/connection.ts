@@ -41,7 +41,7 @@ export interface VMConnection {
   connect(profile: ConnectionProfile, opts: { userConsent: boolean }): Promise<void>;
   trustHost(host: string, fingerprint: string): Promise<void>;
   disconnect(): Promise<void>;
-  executeCommand(command: string): Promise<string>;
+  executeCommand(command: string): Promise<{ output: string; exitCode: number }>;
   listDirectory(path: string): Promise<FileEntry[]>;
 }
 
@@ -121,11 +121,12 @@ export class ExtensionVMConnection implements VMConnection {
     await requestExtension('disconnect', {});
   }
 
-  async executeCommand(command: string): Promise<string> {
-    const res = await requestExtension<{ command: string }, { output: string }>('execute-command', {
-      command,
-    });
-    return res.output;
+  async executeCommand(command: string): Promise<{ output: string; exitCode: number }> {
+    const res = await requestExtension<{ command: string }, { output: string; exitCode: number }>(
+      'execute-command',
+      { command },
+    );
+    return { output: res.output, exitCode: res.exitCode };
   }
 
   async listDirectory(path: string): Promise<FileEntry[]> {
