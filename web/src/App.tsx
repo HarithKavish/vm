@@ -33,8 +33,15 @@ type WindowInstance = {
   snapped: SnapZone | null;
   x: number;
   y: number;
+  // null until the user manually resizes - falls back to the window type's default CSS
+  // size (a min() of a fixed px and a % of the viewport), which adapts to viewport size in
+  // a way a single stored pixel value couldn't. Once set, stays a fixed pixel size, same as
+  // real Windows remembering a resized window's dimensions.
+  width: number | null;
+  height: number | null;
   zIndex: number;
 };
+type ResizeEdge = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw';
 // Notepad's editable content lives outside WindowInstance, keyed separately by instance id,
 // so typing in one Notepad window doesn't churn the `windows` array that position-clamping
 // and z-order effects watch - those only care about window chrome, not keystrokes.
@@ -67,9 +74,9 @@ const APPS: AppDescriptor[] = [
 // files/terminal/settings each get exactly one persistent instance, present from the start
 // (just closed) - notepad has none initially, since instances are created on demand per file.
 const initialWindows: WindowInstance[] = [
-  { id: 'files', appId: 'files', closed: false, minimized: false, maximized: false, snapped: null, x: 132, y: 34, zIndex: 0 },
-  { id: 'terminal', appId: 'terminal', closed: true, minimized: false, maximized: false, snapped: null, x: 176, y: 78, zIndex: 0 },
-  { id: 'settings', appId: 'settings', closed: true, minimized: false, maximized: false, snapped: null, x: 210, y: 60, zIndex: 0 },
+  { id: 'files', appId: 'files', closed: false, minimized: false, maximized: false, snapped: null, x: 132, y: 34, width: null, height: null, zIndex: 0 },
+  { id: 'terminal', appId: 'terminal', closed: true, minimized: false, maximized: false, snapped: null, x: 176, y: 78, width: null, height: null, zIndex: 0 },
+  { id: 'settings', appId: 'settings', closed: true, minimized: false, maximized: false, snapped: null, x: 210, y: 60, width: null, height: null, zIndex: 0 },
 ];
 
 const ICON_GRID_X = 96;
@@ -565,6 +572,11 @@ function App() {
   const desktopRef = useRef<HTMLDivElement | null>(null);
   const windowElRefs = useRef<Partial<Record<string, HTMLElement>>>({});
   const [snapPreview, setSnapPreview] = useState<SnapZone | null>(null);
+  // Set for the duration of an active resize drag so windowClassName can suspend
+  // .app-window's width/height transition (built for the maximize animation) - without
+  // that, every pointermove during a resize would animate instead of applying instantly,
+  // making the window visibly lag behind the cursor.
+  const [resizingId, setResizingId] = useState<string | null>(null);
 
   useEffect(() => {
     const id = window.setInterval(() => {
@@ -922,6 +934,89 @@ function App() {
     window.addEventListener('pointerup', stopDrag);
   };
 
+  const MIN_WINDOW_WIDTH = 340;
+  const MIN_WINDOW_HEIGHT = 220;
+
+  // Drives all 8 resize handles (4 edges + 4 corners) for a window. For edges that move the
+  // window's top-left corner (n/w), the OPPOSITE edge is what should stay fixed in place -
+  // computed once up front as rightEdge/bottomEdge - so width/height are derived from "how far
+  // is the dragged edge from the fixed one" instead of accumulating a separate delta, which
+  // would let rounding/clamping at the size floor make the window visibly jump.
+  const beginResize = (instanceId: string, edge: ResizeEdge, event: ReactPointerEvent<HTMLDivElement>) => {
+    const instance = windows.find((w) => w.id === instanceId);
+    const bounds = desktopRef.current?.getBoundingClientRect();
+    const rect = windowElRefs.current[instanceId]?.getBoundingClientRect();
+    if (!instance || instance.maximized || instance.snapped || event.button !== 0 || !bounds || !rect) {
+      return;
+    }
+    event.stopPropagation();
+    bringToFront(instanceId);
+    setResizingId(instanceId);
+
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const startLeft = instance.x;
+    const startTop = instance.y;
+    const startWidth = rect.width;
+    const startHeight = rect.height;
+    const rightEdge = startLeft + startWidth;
+    const bottomEdge = startTop + startHeight;
+    const pointerId = event.pointerId;
+    const handle = event.currentTarget;
+    handle.setPointerCapture(pointerId);
+
+    const onMove = (moveEvent: PointerEvent) => {
+      const dx = moveEvent.clientX - startX;
+      const dy = moveEvent.clientY - startY;
+      const patch: Partial<WindowInstance> = {};
+
+      if (edge.includes('e')) {
+        const maxWidth = bounds.width - startLeft - 8;
+        patch.width = Math.min(Math.max(MIN_WINDOW_WIDTH, startWidth + dx), maxWidth);
+      }
+      if (edge.includes('s')) {
+        const maxHeight = bounds.height - startTop - 8;
+        patch.height = Math.min(Math.max(MIN_WINDOW_HEIGHT, startHeight + dy), maxHeight);
+      }
+      if (edge.includes('w')) {
+        const clampedLeft = Math.min(Math.max(8, startLeft + dx), rightEdge - MIN_WINDOW_WIDTH);
+        patch.x = clampedLeft;
+        patch.width = rightEdge - clampedLeft;
+      }
+      if (edge.includes('n')) {
+        const clampedTop = Math.min(Math.max(8, startTop + dy), bottomEdge - MIN_WINDOW_HEIGHT);
+        patch.y = clampedTop;
+        patch.height = bottomEdge - clampedTop;
+      }
+
+      setWindows((current) => current.map((w) => (w.id === instanceId ? { ...w, ...patch } : w)));
+    };
+
+    const onUp = () => {
+      handle.releasePointerCapture(pointerId);
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      setResizingId(null);
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  };
+
+  const resizeHandles = (instance: WindowInstance) =>
+    !instance.maximized && !instance.snapped && (
+      <>
+        <div className="resize-handle is-n" onPointerDown={(event) => beginResize(instance.id, 'n', event)} />
+        <div className="resize-handle is-s" onPointerDown={(event) => beginResize(instance.id, 's', event)} />
+        <div className="resize-handle is-e" onPointerDown={(event) => beginResize(instance.id, 'e', event)} />
+        <div className="resize-handle is-w" onPointerDown={(event) => beginResize(instance.id, 'w', event)} />
+        <div className="resize-handle is-ne" onPointerDown={(event) => beginResize(instance.id, 'ne', event)} />
+        <div className="resize-handle is-nw" onPointerDown={(event) => beginResize(instance.id, 'nw', event)} />
+        <div className="resize-handle is-se" onPointerDown={(event) => beginResize(instance.id, 'se', event)} />
+        <div className="resize-handle is-sw" onPointerDown={(event) => beginResize(instance.id, 'sw', event)} />
+      </>
+    );
+
   const beginIconDrag = (id: AppId, event: ReactPointerEvent<HTMLButtonElement>) => {
     if (event.button !== 0) {
       return;
@@ -1222,6 +1317,8 @@ function App() {
       snapped: null,
       x: 250 + offset,
       y: 90 + offset,
+      width: null,
+      height: null,
       zIndex: zCounterRef.current,
     };
     setWindows((current) => [...current, instance]);
@@ -1352,13 +1449,21 @@ function App() {
       instance.closed ? 'is-closed' : '',
       instance.snapped === 'left' ? 'is-snapped-left' : '',
       instance.snapped === 'right' ? 'is-snapped-right' : '',
+      resizingId === instance.id ? 'is-resizing' : '',
     ]
       .filter(Boolean)
       .join(' ');
 
   const windowInlineStyle = (instance: WindowInstance): CSSProperties => ({
     zIndex: instance.zIndex,
-    ...(instance.maximized || instance.snapped ? {} : { left: instance.x, top: instance.y }),
+    ...(instance.maximized || instance.snapped
+      ? {}
+      : {
+          left: instance.x,
+          top: instance.y,
+          ...(instance.width != null ? { width: instance.width } : {}),
+          ...(instance.height != null ? { height: instance.height } : {}),
+        }),
   });
 
   const instanceTitle = (w: WindowInstance) => {
@@ -1513,6 +1618,7 @@ function App() {
             style={windowInlineStyle(filesWindow)}
             onPointerDown={() => bringToFront('files')}
           >
+            {resizeHandles(filesWindow)}
             <header className="window-titlebar" onPointerDown={(event) => beginDrag('files', event)}>
               <img src={folderIcon} alt="" className="titlebar-icon" />
               <span>File Explorer</span>
@@ -1666,6 +1772,7 @@ function App() {
             style={windowInlineStyle(terminalWindow)}
             onPointerDown={() => bringToFront('terminal')}
           >
+            {resizeHandles(terminalWindow)}
             <header className="window-titlebar is-dark" onPointerDown={(event) => beginDrag('terminal', event)}>
               <div className="terminal-tab">
                 <img src={terminalIcon} alt="" className="titlebar-icon" />
@@ -1699,6 +1806,7 @@ function App() {
               style={windowInlineStyle(instance)}
               onPointerDown={() => bringToFront(instance.id)}
             >
+              {resizeHandles(instance)}
               <header className="window-titlebar" onPointerDown={(event) => beginDrag(instance.id, event)}>
                 <img src={notepadIcon} alt="" className="titlebar-icon" />
                 <span>
@@ -1756,6 +1864,7 @@ function App() {
             style={windowInlineStyle(settingsWindow)}
             onPointerDown={() => bringToFront('settings')}
           >
+            {resizeHandles(settingsWindow)}
             <header className="window-titlebar" onPointerDown={(event) => beginDrag('settings', event)}>
               <img src={settingsIcon} alt="" className="titlebar-icon" />
               <span>Settings</span>

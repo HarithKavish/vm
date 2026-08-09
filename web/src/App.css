@@ -452,6 +452,82 @@ button:disabled {
   box-shadow: 0 28px 90px rgba(0, 0, 0, 0.46);
 }
 
+/* Suspends the width/height/transform transition (built for maximize/minimize) during an
+   active manual resize drag - otherwise every pointermove would animate instead of applying
+   instantly, and the window would visibly lag behind the cursor. */
+.app-window.is-resizing {
+  transition: none;
+}
+
+.resize-handle {
+  position: absolute;
+  z-index: 15;
+}
+
+.resize-handle.is-n,
+.resize-handle.is-s {
+  left: 10px;
+  right: 10px;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.resize-handle.is-n {
+  top: 0;
+}
+
+.resize-handle.is-s {
+  bottom: 0;
+}
+
+.resize-handle.is-e,
+.resize-handle.is-w {
+  top: 10px;
+  bottom: 10px;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.resize-handle.is-e {
+  right: 0;
+}
+
+.resize-handle.is-w {
+  left: 0;
+}
+
+.resize-handle.is-ne,
+.resize-handle.is-nw,
+.resize-handle.is-se,
+.resize-handle.is-sw {
+  width: 12px;
+  height: 12px;
+}
+
+.resize-handle.is-ne {
+  top: 0;
+  right: 0;
+  cursor: nesw-resize;
+}
+
+.resize-handle.is-nw {
+  top: 0;
+  left: 0;
+  cursor: nwse-resize;
+}
+
+.resize-handle.is-se {
+  bottom: 0;
+  right: 0;
+  cursor: nwse-resize;
+}
+
+.resize-handle.is-sw {
+  bottom: 0;
+  left: 0;
+  cursor: nesw-resize;
+}
+
 .app-window.is-maximized {
   inset: 0;
   width: auto;
