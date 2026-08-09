@@ -1114,11 +1114,6 @@ function App() {
     setNotepadState({});
   };
 
-  const notepadDirty = (instanceId: string) => {
-    const state = notepadState[instanceId];
-    return !!state && state.content !== state.savedContent;
-  };
-
   const patchNotepadState = (instanceId: string, patch: Partial<NotepadState>) => {
     setNotepadState((current) =>
       current[instanceId] ? { ...current, [instanceId]: { ...current[instanceId], ...patch } } : current,
