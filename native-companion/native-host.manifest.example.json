@@ -1,0 +1,8 @@
+{
+  "name": "com.harith.vm_desktop",
+  "description": "VM Desktop native SSH companion",
+  "path": "/absolute/path/to/vm-desktop-companion",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://mkceajnjaipdpkegbgponncjaknnnece/"]
+}
+

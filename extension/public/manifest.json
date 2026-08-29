@@ -1,0 +1,35 @@
+{
+  "manifest_version": 3,
+  "name": "VM Desktop Bridge",
+  "version": "0.1.0",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEArHH51e5RI4EL+7RZ7723IFJyCPwhDOukeZRYcCLcgbHnmW/x+rJ2UJGxRjtNA6G+cSocmEclzXrnkgUAAbiBB6mSS0wFuL2NPvhZea1wuHXYuhEbEw5azKuIbZMdWj42QRn+O6OW2HUs+owEwxinexMV08VAMtIcx1oGjdLhrwUvn99dgLpeYIvTxk9pe5qYzevLnQsrdno/wds41sFSifaMjwT8LcjukRPqg5KvymTcsu8fzFj5RdAH3Jmx2+xYLr7O6/wxFcdBkF8sMtsaNxqMH48cyfpYb4QRVOYM1t2qlzDDh1NppGHPfbWQahfE+8tVYe4BJx7NNaa52JXG3wIDAQAB",
+  "description": "Native messaging bridge for VM Desktop web origins",
+  "permissions": ["nativeMessaging", "storage"],
+  "host_permissions": [
+    "https://vm.harithkavish.com/*",
+    "https://harithkavish.github.io/vm/*",
+    "http://localhost:5173/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://vm.harithkavish.com/*",
+        "https://harithkavish.github.io/vm/*",
+        "http://localhost:5173/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_start"
+    }
+  ],
+  "externally_connectable": {
+    "matches": [
+      "https://vm.harithkavish.com/*",
+      "https://harithkavish.github.io/vm/*",
+      "http://localhost:5173/*"
+    ]
+  }
+}
