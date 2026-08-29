@@ -2,7 +2,9 @@ name: Deploy Web to GitHub Pages
 
 on:
   push:
-    branches: ["**"]
+    # Production only. This previously matched every branch, which is how an
+    # unmerged feature branch came to be serving vm.harithkavish.com.
+    branches: ["main"]
     paths:
       - "web/**"
       - "CNAME"
