@@ -52,6 +52,7 @@ jobs:
           PR: ${{ github.event.pull_request.number }}
           SHA: ${{ github.event.pull_request.head.sha }}
           OWNER: ${{ github.repository_owner }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
           # Minutes to wait for the reviewer. A review is several minutes of model
           # work; failing before it lands would make the gate meaningless noise.
           WAIT_MINUTES: '20'
@@ -63,7 +64,20 @@ jobs:
           echo "files touching .github/workflows: $touches_workflows"
 
           if [ "${touches_workflows:-0}" -gt 0 ]; then
-            echo "::notice::This pull request changes workflow files, so the automated reviewer cannot judge it. It needs an approving review from $OWNER."
+            # The reviewer will not judge a change to itself, so this needs the owner's
+            # say-so. Raising it counts as saying so: GitHub forbids approving your own
+            # pull request, so demanding an approval from the author deadlocks the owner
+            # out of ever changing a workflow -- which is what happened on #93.
+            #
+            # This trusts the author field, so it is only as good as the identities being
+            # distinct: an agent that opens pull requests using the owner's token looks
+            # like the owner here. Jarvis has his own installation
+            # (jarvis-harithkavish[bot]) and is expected to use it.
+            if [ "$AUTHOR" = "$OWNER" ]; then
+              echo "✓ workflow change raised by $OWNER -- the owner's own change is the owner's decision."
+              exit 0
+            fi
+            echo "::notice::Raised by $AUTHOR, not $OWNER, and it changes workflow files -- so it needs the owner's approving review."
             approvals=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
                           --jq "[.[] | select(.state==\"APPROVED\") | .user.login] | unique | join(\",\")")
             echo "approvals: [${approvals:-none}]"
@@ -72,7 +86,7 @@ jobs:
                 echo "✓ approved by $OWNER -- a workflow change is allowed on the owner's say-so."
                 exit 0 ;;
             esac
-            echo "::error::Blocked. A pull request touching .github/workflows/ needs an approving review from $OWNER, because the reviewer deliberately will not run on a change to itself. Approve it, or move the workflow change to its own pull request."
+            echo "::error::Blocked. A pull request from $AUTHOR touching .github/workflows/ needs an approving review from $OWNER, because the reviewer deliberately will not run on a change to itself. Approve it, or split the workflow change into its own pull request."
             exit 1
           fi
 
