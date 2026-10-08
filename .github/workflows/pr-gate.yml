@@ -31,6 +31,10 @@ name: PR Gate
 on:
   pull_request:
     types: [opened, reopened, synchronize, ready_for_review]
+  # Re-decide when someone reviews: a HOLD verdict, or a workflow change, passes on the
+  # owner's approval, and without this the approval would never be seen.
+  pull_request_review:
+    types: [submitted]
 
 permissions:
   checks: read
@@ -51,6 +55,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.pull_request.number }}
           SHA: ${{ github.event.pull_request.head.sha }}
+          DEFAULT: ${{ github.event.repository.default_branch }}
           OWNER: ${{ github.repository_owner }}
           AUTHOR: ${{ github.event.pull_request.user.login }}
           # Minutes to wait for the reviewer. A review is several minutes of model
@@ -59,9 +64,24 @@ jobs:
         run: |
           set -uo pipefail
 
-          touches_workflows=$(gh api "repos/$REPO/pulls/$PR/files" --paginate \
-                                --jq '[.[] | select(.filename | startswith(".github/workflows/"))] | length')
-          echo "files touching .github/workflows: $touches_workflows"
+          # A workflow change the reviewer will not judge needs the owner. But a workflow
+          # file that is IDENTICAL to the default branch's was already accepted there --
+          # a promotion carrying development's workflows to runway is the common case --
+          # and the reviewer does run on it, so it goes through the verdict like anything
+          # else. Only workflow files that differ from the default branch count.
+          touches_workflows=0
+          for wf in $(gh api "repos/$REPO/pulls/$PR/files" --paginate \
+                        --jq '.[] | select(.filename | startswith(".github/workflows/")) | .filename'); do
+            at_head=$(gh api "repos/$REPO/contents/$wf?ref=$SHA" --jq .sha 2>/dev/null || true)
+            at_default=$(gh api "repos/$REPO/contents/$wf?ref=$DEFAULT" --jq .sha 2>/dev/null || true)
+            if [ -n "$at_head" ] && [ "$at_head" = "$at_default" ]; then
+              echo "  $wf: identical to $DEFAULT -- already accepted there"
+            else
+              echo "  $wf: differs from $DEFAULT"
+              touches_workflows=$((touches_workflows + 1))
+            fi
+          done
+          echo "workflow files that differ from $DEFAULT: $touches_workflows"
 
           if [ "${touches_workflows:-0}" -gt 0 ]; then
             # The reviewer will not judge a change to itself, so this needs the owner's
@@ -106,17 +126,45 @@ jobs:
             # green having reviewed nothing. Observed on api#18: success in 11 seconds,
             # no review posted. So require the reviewer's own evidence, posted after the
             # commit it is meant to have read.
-            spoke=$(gh api "repos/$REPO/issues/$PR/comments?per_page=100" --paginate \
-                      --jq "[.[] | select(.user.login==\"claude[bot]\") | select(.created_at > \"$pushed_at\")] | length" 2>/dev/null)
-            echo "review check: status=$status conclusion=$concl | reviewer comments since head: ${spoke:-0}"
+            #
+            # AND WHAT IT SAID. Until 2026-10-08 this passed once the reviewer had posted
+            # anything at all -- so a review reporting a defect still passed, and anything
+            # that merges once the gate is green (auto-merge, or Jarvis merging his own work)
+            # would have merged it. The reviewer now opens with a verdict line, and only
+            # PASS passes. HOLD -- correct, but touching credentials or secrets -- passes on
+            # the owner's approval. FAIL, or no verdict, does not.
+            said=$(gh api "repos/$REPO/issues/$PR/comments?per_page=100" \
+                     --jq "[.[] | select(.user.login==\"claude[bot]\") | select(.created_at > \"$pushed_at\") | .body] | last // empty" 2>/dev/null || true)
+            # `|| true`: Actions runs this under bash -e whatever `set` says above, and grep
+            # finding nothing -- no review posted yet -- would kill the gate silently. It
+            # did, on diary#13, on the first pass of this loop.
+            verdict=$(printf '%s\n' "$said" | grep -m1 -oiE '^[^A-Za-z]*VERDICT:[[:space:]]*(PASS|FAIL|HOLD)' \
+                        | grep -oiE 'PASS|FAIL|HOLD' | tr '[:lower:]' '[:upper:]' || true)
+            echo "review check: status=$status conclusion=$concl | verdict on this commit: ${verdict:-none}"
 
             case "$status:$concl" in
               completed:success)
-                if [ "${spoke:-0}" -gt 0 ]; then
-                  echo "✓ reviewed and passed."
-                  exit 0
+                case "$verdict" in
+                  PASS)
+                    echo "✓ reviewed: PASS."
+                    exit 0 ;;
+                  HOLD)
+                    approvals=$(gh api "repos/$REPO/pulls/$PR/reviews" --paginate \
+                                  --jq "[.[] | select(.state==\"APPROVED\") | .user.login] | unique | join(\",\")" || true)
+                    case ",${approvals}," in
+                      *",$OWNER,"*) echo "✓ held for $OWNER, and $OWNER approved it."; exit 0 ;;
+                    esac
+                    echo "::error::The reviewer found it correct but HELD it for $OWNER: it touches credentials, authentication or secrets. It merges once $OWNER approves."
+                    exit 1 ;;
+                  FAIL)
+                    echo "::error::The reviewer's verdict is FAIL. Address what it found, push, and it reviews again."
+                    exit 1 ;;
+                esac
+                if [ -z "$said" ]; then
+                  echo "::error::The review check is green but the reviewer never posted anything for this commit, which means it did not run -- the silent refusal from issue #90. Most often allowed_bots does not name the author. Fix the workflow in this repository, then push again."
+                else
+                  echo "::error::The reviewer posted, but with no VERDICT line, so there is nothing to pass on. Failing closed."
                 fi
-                echo "::error::The review check is green but the reviewer never posted anything for this commit, which means it did not run -- the silent refusal from issue #90. Most often allowed_bots does not name the author. Fix the workflow in this repository, then push again."
                 exit 1 ;;
               completed:skipped|completed:neutral)
                 echo "::error::The review check reported '$concl' rather than running. Most often this is the reviewer refusing a bot-authored pull request because allowed_bots does not name it -- the failure that left 54 repositories unreviewed for a month. Fix the workflow, then re-run."
