@@ -1,0 +1,114 @@
+name: Release
+
+# A version tag (v0.1.0) builds the browser extension and the native companion for each platform
+# and publishes them together as one GitHub release, so whoever installs them can tell which
+# version they have and fetch it again later (standards/DEPLOYMENT.md, Releases and Artifacts).
+# The per-push artifact workflows keep running; their artifacts expire, a release does not.
+#
+# The tag must match the extension's manifest version (extension/public/manifest.json) and point
+# at a commit on main.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check the tag
+        run: |
+          version=$(jq -r .version extension/public/manifest.json)
+          if [ "$GITHUB_REF_NAME" != "v$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match the extension's manifest version, $version."
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_REF_NAME is not on main. Releases are cut from main only."
+            exit 1
+          fi
+
+  extension:
+    needs: check
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: extension/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - name: Package
+        run: |
+          cd dist
+          zip -r "../vm-desktop-bridge-${GITHUB_REF_NAME}.zip" .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-extension
+          path: extension/vm-desktop-bridge-*.zip
+          if-no-files-found: error
+
+  companion:
+    needs: check
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, goos: linux, goarch: amd64, binary: vm-desktop-companion, suffix: linux-amd64 }
+          - { os: windows-latest, goos: windows, goarch: amd64, binary: vm-desktop-companion.exe, suffix: windows-amd64 }
+          - { os: macos-latest, goos: darwin, goarch: arm64, binary: vm-desktop-companion, suffix: macos-arm64 }
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: native-companion
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: native-companion/go.mod
+      - run: go test ./...
+      - name: Build and package
+        run: |
+          mkdir -p dist
+          GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} go build -o "dist/${{ matrix.binary }}" .
+          cp native-host.manifest.example.json install.ps1 dist/
+          name="vm-desktop-companion-${GITHUB_REF_NAME}-${{ matrix.suffix }}"
+          cd dist
+          if [ "${{ matrix.goos }}" = windows ]; then
+            7z a "../$name.zip" . > /dev/null
+          else
+            tar -czf "../$name.tar.gz" .
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-companion-${{ matrix.suffix }}
+          path: native-companion/vm-desktop-companion-*
+          if-no-files-found: error
+
+  release:
+    needs: [extension, companion]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: assets
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME" assets/*
+          --repo "$GITHUB_REPOSITORY" --verify-tag --title "$GITHUB_REF_NAME" --generate-notes
